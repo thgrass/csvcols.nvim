@@ -96,9 +96,9 @@ require('csvcols').setup({
 csvcols.nvim/
 ├─ lua/
 │  └─ csvcols/
-│     └─ init.lua        <-- main plugin module (provided in the docs)
+│     └─ init.lua        <-- main plugin module
 ├─ plugin/
-│  └─ csvcols.lua        <-- optional: auto-setup with defaults (below)
+│  └─ csvcols.lua        <-- auto-setup with defaults
 ├─ README.md
 └─ LICENSE
 ```
