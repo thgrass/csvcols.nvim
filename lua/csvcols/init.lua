@@ -208,7 +208,7 @@ function M._winbar_for(win)
   if not mouse_supports_clicks() then
     return table.concat({
       "%#Title#CSV hdr:%* ",
-      ("%#Title#%d%* "):format(n),
+      "%#Title#", tostring(n), "%* ",
       "%=%#Comment#  csvcols%*",
     })
   end
@@ -216,7 +216,7 @@ function M._winbar_for(win)
   return table.concat({
     "%#Title#CSV hdr:%* ",
     "%@v:lua.require'csvcols'._click_dec@[-]%X ",
-    ("%#Title#%d%* "):format(n),
+    "%#Title#", tostring(n), "%* ",
     "%@v:lua.require'csvcols'._click_inc@[+ ]%X",
     "%=%#Comment#  csvcols%*",
   })
