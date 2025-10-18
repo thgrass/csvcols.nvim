@@ -60,6 +60,7 @@ local function close_overlay(win)
 end
 
 -- Ensure a float exists at row 0 with given width/height and left offset col_off
+-- Ensure a float exists at row 0 with given width/height and left offset col_off
 local function ensure_overlay(win, height, col_off, width)
   local ov = overlays[win]
   col_off = col_off or 0
@@ -76,6 +77,16 @@ local function ensure_overlay(win, height, col_off, width)
       zindex = 50,
     })
     ov.height = height
+
+    -- keep window-local options in sync (no error if win disappeared)
+    local ok_list, list_val = pcall(vim.api.nvim_get_option_value, "list", { win = win })
+    if ok_list then pcall(vim.api.nvim_set_option_value, "list", list_val, { win = ov.win }) end
+
+    -- keep buffer-local tabstop in sync (read from source buf, set on overlay buf)
+    local src_buf = vim.api.nvim_win_get_buf(win)
+    local ok_ts, ts_val = pcall(vim.api.nvim_get_option_value, "tabstop", { buf = src_buf })
+    if ok_ts then pcall(vim.api.nvim_set_option_value, "tabstop", ts_val, { buf = ov.buf }) end
+
     return ov
   end
 
@@ -92,15 +103,23 @@ local function ensure_overlay(win, height, col_off, width)
     noautocmd = true,
     zindex = 50,
   })
-  -- minimal UI
-  pcall(vim.api.nvim_set_option_value, "wrap", false, { win = float })
-  pcall(vim.api.nvim_set_option_value, "cursorline", false, { win = float })
-  pcall(vim.api.nvim_set_option_value, "number", false, { win = float })
-  pcall(vim.api.nvim_set_option_value, "relativenumber", false, { win = float })
-  pcall(vim.api.nvim_set_option_value, "signcolumn", "no", { win = float })
-  pcall(vim.api.nvim_set_option_value, "foldcolumn", "0", { win = float })
-  pcall(vim.api.nvim_set_option_value, "list", vim.api.nvim_get_option_value("list", { win = win }), { win = float })
-  pcall(vim.api.nvim_set_option_value, "tabstop", vim.api.nvim_get_option_value("tabstop", { win = win }), { win = float })
+
+  -- minimal UI on the overlay **window**
+  pcall(vim.api.nvim_set_option_value, "wrap", false,            { win = float })
+  pcall(vim.api.nvim_set_option_value, "cursorline", false,      { win = float })
+  pcall(vim.api.nvim_set_option_value, "number", false,          { win = float })
+  pcall(vim.api.nvim_set_option_value, "relativenumber", false,  { win = float })
+  pcall(vim.api.nvim_set_option_value, "signcolumn", "no",       { win = float })
+  pcall(vim.api.nvim_set_option_value, "foldcolumn", "0",        { win = float })
+
+  -- copy window-local option(s) from the source window to the overlay window
+  local ok_list, list_val = pcall(vim.api.nvim_get_option_value, "list", { win = win })
+  if ok_list then pcall(vim.api.nvim_set_option_value, "list", list_val, { win = float }) end
+
+  -- copy buffer-local option(s) from the source buffer to the overlay buffer
+  local src_buf = vim.api.nvim_win_get_buf(win)
+  local ok_ts, ts_val = pcall(vim.api.nvim_get_option_value, "tabstop", { buf = src_buf })
+  if ok_ts then pcall(vim.api.nvim_set_option_value, "tabstop", ts_val, { buf = buf }) end
 
   overlays[win] = { win = float, buf = buf, height = height }
   return overlays[win]
