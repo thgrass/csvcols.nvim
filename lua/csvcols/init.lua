@@ -1,8 +1,8 @@
 -- csvcols/init.lua
---
 -- CSV/TSV column coloring + sticky header.
 -- Sticky header is rendered via a per-window floating overlay at row 0.
 -- Buttons in the winbar adjust the number of header lines per buffer.
+-- Alignment uses the window's text offset (line numbers/sign/fold) so headers line up.
 
 local M = {}
 
@@ -48,7 +48,8 @@ local function inc_header_n(buf, d)
 end
 
 -- floating overlay manager (per-window)
-local overlays = {}  -- winid -> { win = float_winid, buf = float_bufid, height = int }
+-- overlays[winid] = { win = float_winid, buf = float_bufid, height = int }
+local overlays = {}
 local function close_overlay(win)
   local ov = overlays[win]
   if not ov then return end
@@ -57,20 +58,39 @@ local function close_overlay(win)
   end
   overlays[win] = nil
 end
-local function ensure_overlay(win, height)
+
+-- Ensure a float exists at row 0 with given width/height and left offset col_off
+local function ensure_overlay(win, height, col_off, width)
   local ov = overlays[win]
-  local width = vim.api.nvim_win_get_width(win)
+  col_off = col_off or 0
+  width   = math.max(1, width or 1)
+
   if ov and ov.win and vim.api.nvim_win_is_valid(ov.win) then
     pcall(vim.api.nvim_win_set_config, ov.win, {
-      relative = "win", win = win, row = 0, col = 0, width = width, height = height,
+      relative = "win",
+      win = win,
+      row = 0,
+      col = col_off,
+      width = width,
+      height = height,
+      zindex = 50,
     })
     ov.height = height
     return ov
   end
+
   local buf = vim.api.nvim_create_buf(false, true) -- scratch, nofile
   local float = vim.api.nvim_open_win(buf, false, {
-    relative = "win", win = win, row = 0, col = 0, width = width, height = height,
-    focusable = false, style = "minimal", noautocmd = true,
+    relative = "win",
+    win = win,
+    row = 0,
+    col = col_off,
+    width = width,
+    height = height,
+    focusable = false,
+    style = "minimal",
+    noautocmd = true,
+    zindex = 50,
   })
   -- minimal UI
   pcall(vim.api.nvim_set_option_value, "wrap", false, { win = float })
@@ -79,6 +99,8 @@ local function ensure_overlay(win, height)
   pcall(vim.api.nvim_set_option_value, "relativenumber", false, { win = float })
   pcall(vim.api.nvim_set_option_value, "signcolumn", "no", { win = float })
   pcall(vim.api.nvim_set_option_value, "foldcolumn", "0", { win = float })
+  pcall(vim.api.nvim_set_option_value, "list", vim.api.nvim_get_option_value("list", { win = win }), { win = float })
+  pcall(vim.api.nvim_set_option_value, "tabstop", vim.api.nvim_get_option_value("tabstop", { win = win }), { win = float })
 
   overlays[win] = { win = float, buf = buf, height = height }
   return overlays[win]
@@ -152,6 +174,7 @@ local function field_ranges(line, sep, max_cols)
 end
 
 -- Render sticky header via a floating window pinned to row 0 of the target window.
+-- Alignment is handled by anchoring the float at the window's text offset ("textoff").
 local function render_header(win, buf, sep, top)
   local n = get_header_n(buf)
 
@@ -170,8 +193,13 @@ local function render_header(win, buf, sep, top)
   local upto = math.min(n, total)
   local header_lines = vim.api.nvim_buf_get_lines(buf, 0, upto, false)
 
-  -- Create/resize overlay
-  local ov = ensure_overlay(win, upto)
+  -- Get exact on-screen left offset for buffer text area (line numbers/sign/fold)
+  local info = vim.fn.getwininfo(win)[1]
+  local col_off = (info and info.textoff) or 0
+  local text_w  = math.max(1, ((info and info.width) or vim.api.nvim_win_get_width(win)) - col_off)
+
+  -- Create/resize overlay at correct horizontal offset
+  local ov = ensure_overlay(win, upto, col_off, text_w)
 
   -- Fill overlay buffer and colorize columns
   vim.api.nvim_buf_set_option(ov.buf, "modifiable", true)
@@ -285,7 +313,7 @@ function M.refresh(win)
     end
   end
 
-  -- sticky header (float)
+  -- sticky header (float, aligned via textoff)
   render_header(win, buf, sep, top)
 
   -- winbar controls
@@ -311,14 +339,15 @@ function M.setup(opts)
     }
   )
 
-  vim.api.nvim_create_autocmd({ "BufLeave", "WinClosed", "WinLeave" }, {
+  -- On WinClosed, <amatch> is the closing window id as a string
+  vim.api.nvim_create_autocmd("WinClosed", {
     group = augroup,
-    callback = function()
-      -- ensure any overlay is closed when leaving/closing
-      local w = vim.api.nvim_get_current_win()
-      close_overlay(w)
+    pattern = "*",
+    callback = function(args)
+      local w = tonumber(args.match)
+      if w then close_overlay(w) end
     end,
-    desc = "csvcols: cleanup overlay on leave",
+    desc = "csvcols: cleanup overlay on window close",
   })
 
   -- Commands
