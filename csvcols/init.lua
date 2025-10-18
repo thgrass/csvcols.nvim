@@ -55,6 +55,12 @@ local function is_csv_buf(buf)
   return name:match("%.csv$") or name:match("%.tsv$")
 end
 
+local function check_mouse_support()
+  local m = vim.o.mouse or ""
+  -- clicks work in Normal/Visual; 'a' covers all modes
+  return m:find("a", 1, true) or m:find("n", 1, true) or m:find("v", 1, true)
+end
+
 local function set_default_hl()
   for i, color in ipairs(M.config.colors) do
     local def = (M.config.mode == "bg") and { bg = color } or { fg = color }
@@ -171,7 +177,17 @@ function M._winbar_for(win)
     return ""
   end
   local n = get_header_n(buf)
-  -- Click handlers call Lua funcs below. %X ends the clickable region.
+
+  -- If mouse is off, show a simple, non-clickable readout
+  if not check_mouse_support() then
+    return table.concat({
+      "%#Title#CSV hdr:%* ",
+      ("%#Title#%d%* "):format(n),
+      "%=%#Comment#  csvcols%*",
+    })
+  end
+
+  -- Clickable version.
   -- Layout:  CSV hdr: [ - ]  n  [ + ]     (align right)
   local bar = table.concat({
     "%#Title#CSV hdr:%* ",

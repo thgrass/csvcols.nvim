@@ -1,6 +1,6 @@
 # csvcols.nvim
 
-Colorize **CSV/TSV** files by giving each **column** a distinct highlight color. Tiny, fast, written in Lua. Highlights only the **visible window range** and updates as you scroll or edit.
+Colorize **CSV/TSV** files by giving each **column** a distinct highlight color. Tiny, fast, written in Lua. Highlights only the **visible window range** and updates as you scroll or edit. Supports sticky headers with arbitry number of lines.
 
 ---
 
@@ -9,6 +9,7 @@ Colorize **CSV/TSV** files by giving each **column** a distinct highlight color.
 - Background **or** foreground coloring
 - Efficient: re-highlights only visible lines on `WinScrolled`, `CursorMoved`, edits, etc.
 - Zero‑config optional auto‑setup (via `plugin/csvcols.lua`), or explicit `setup()`
+- Sticky headers configurable via commands or (optional) GUI buttons.
 
 ## Requirements
 - Neovim 0.8+ (LuaJIT)
@@ -86,8 +87,14 @@ require('csvcols').setup({
   max_columns = 64,      -- soft cap for work on ultra-wide files
   patterns = { "*.csv", "*.tsv" },
   filetypes = { "csv", "tsv" }, -- if you have ftplugins setting these
+  default_header_lines = 1,  -- How many lines to pin by default (0 disables by default)
+  use_winbar_controls = true, -- Show clickable [-]/[+] buttons in winbar that change lines in sticky header
 })
+
+vim.opt.mouse = "a"    -- enable mouse, should be enabled per default
 ```
+
+
 
 ---
 
