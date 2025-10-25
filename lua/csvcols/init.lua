@@ -27,6 +27,13 @@ M.config = {
 
   default_header_lines = 1,    -- sticky header ON by default
   use_winbar_controls = true,  -- show [-] n [+] buttons in winbar
+
+  -- Clean-view settings
+  -- When true, compute widths from the whole file. Set to false to use only the visible window.
+  clean_view_full_scan = true,
+
+  -- Default keymap for clean-view toggle (gC). Set to false to disable.
+  keymap = true,
 }
 
 -- per-buffer state (weak keys)
@@ -59,7 +66,6 @@ local function close_overlay(win)
   overlays[win] = nil
 end
 
--- Ensure a float exists at row 0 with given width/height and left offset col_off
 -- Ensure a float exists at row 0 with given width/height and left offset col_off
 local function ensure_overlay(win, height, col_off, width)
   local ov = overlays[win]
@@ -256,11 +262,13 @@ function M._winbar_for(win)
       "%@v:lua.require'csvcols'._click_dec@[-]%X ",
       "%#Title#", tostring(n), "%* ",
       "%@v:lua.require'csvcols'._click_inc@[+ ]%X",
+      "%@v:lua.require'csvcols'._click_toggle_clean@[⯈]%X",
     })
   else
     left = table.concat({
       "%#Title#CSV hdr:%* ",
       "%#Title#", tostring(n), "%* ",
+      "[⯈]",
     })
   end
   local right = "%=%#Comment#  csvcols%*"
@@ -283,18 +291,118 @@ function M._click_dec(_, _, _, _)
   M.refresh(win)
 end
 
-local function maybe_set_winbar(win)
-  if not M.config.use_winbar_controls then return end
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Clean view implementation
+-- Renders a padded, spreadsheet-like copy of the CSV/TSV in a scratch float.
+-- Original buffer remains unchanged; toggle again to close.
+local function compute_column_widths(lines, sep)
+  local max_widths = {}
+  local max_cols = M.config.max_columns or 64
+  for _, line in ipairs(lines) do
+    local ranges = field_ranges(line, sep, max_cols)
+    for col_idx, r in ipairs(ranges) do
+      local start_col, end_col = r[1], r[2]
+      local cell = (end_col == -1) and line:sub(start_col + 1) or line:sub(start_col + 1, end_col)
+      cell = cell:gsub('^%s*', ''):gsub('%s*$', '')
+      if cell:sub(1,1) == '"' and cell:sub(-1) == '"' then
+        cell = cell:sub(2, -2)
+      end
+      local w = vim.fn.strdisplaywidth(cell) or #cell
+      max_widths[col_idx] = math.max(max_widths[col_idx] or 0, w)
+    end
+  end
+  return max_widths
+end
+
+local function build_padded_lines(lines, sep, widths)
+  local result = {}
+  local max_cols = #widths
+  for _, line in ipairs(lines) do
+    local ranges = field_ranges(line, sep, max_cols)
+    local parts = {}
+    for col_idx, r in ipairs(ranges) do
+      local start_col, end_col = r[1], r[2]
+      local cell = (end_col == -1) and line:sub(start_col + 1) or line:sub(start_col + 1, end_col)
+      cell = cell:gsub('^%s*', ''):gsub('%s*$', '')
+      if cell:sub(1,1) == '"' and cell:sub(-1) == '"' then
+        cell = cell:sub(2, -2)
+      end
+      local pad = widths[col_idx] - (vim.fn.strdisplaywidth(cell) or #cell)
+      parts[#parts+1] = cell .. string.rep(' ', pad + 2) -- two spaces between cols
+    end
+    result[#result+1] = table.concat(parts)
+  end
+  return result
+end
+
+function M.toggle_clean_view()
+  local win = vim.api.nvim_get_current_win()
   local buf = vim.api.nvim_win_get_buf(win)
   if not is_csv_buf(buf) then
-    -- Clear our winbar if present
-    local cur = vim.wo[win].winbar or ""
-    if cur:match("csvcols") then
-      pcall(vim.api.nvim_set_option_value, "winbar", "", { scope = "local", win = win })
-    end
+    vim.notify("[csvcols] Clean view is only available for CSV/TSV buffers", vim.log.levels.WARN)
     return
   end
-  pcall(vim.api.nvim_set_option_value, "winbar", M._winbar_for(win), { scope = "local", win = win })
+
+  local st = bufstate(buf)
+  if st.clean_view then
+    local cv = st.clean_view
+    if cv.win and vim.api.nvim_win_is_valid(cv.win) then
+      vim.api.nvim_win_close(cv.win, true)
+    end
+    st.clean_view = nil
+    return
+  end
+
+  local total = vim.api.nvim_buf_line_count(buf)
+  local top, bottom = 0, total
+  if not M.config.clean_view_full_scan then
+    top = vim.fn.line("w0") - 1
+    bottom = vim.fn.line("w$")
+  end
+
+  local lines = vim.api.nvim_buf_get_lines(buf, top, bottom, false)
+  local sep = get_sep(buf)
+  local widths = compute_column_widths(lines, sep)
+  local padded = build_padded_lines(lines, sep, widths)
+
+  local new_buf = vim.api.nvim_create_buf(false, true) -- scratch
+  vim.api.nvim_buf_set_lines(new_buf, 0, -1, false, padded)
+  vim.api.nvim_buf_set_option(new_buf, "modifiable", false)
+
+  local info = vim.fn.getwininfo(win)[1]
+  local col_off = (info and info.textoff) or 0
+
+  local width = 0
+  for _, w in ipairs(widths) do width = width + w + 2 end
+  local max_w = vim.api.nvim_win_get_width(win) - col_off
+  if width > max_w then width = max_w end
+
+  local height = math.min(#padded, vim.api.nvim_win_get_height(win))
+  local new_win = vim.api.nvim_open_win(new_buf, false, {
+    relative = "win",
+    win = win,
+    row = 0,
+    col = col_off,
+    width = math.max(1, width),
+    height = math.max(1, height),
+    focusable = false,
+    style = "minimal",
+    noautocmd = true,
+    zindex = 60,
+  })
+
+  pcall(vim.api.nvim_set_option_value, "wrap", false,           { win = new_win })
+  pcall(vim.api.nvim_set_option_value, "cursorline", false,     { win = new_win })
+  pcall(vim.api.nvim_set_option_value, "number", false,         { win = new_win })
+  pcall(vim.api.nvim_set_option_value, "relativenumber", false, { win = new_win })
+  pcall(vim.api.nvim_set_option_value, "signcolumn", "no",      { win = new_win })
+  pcall(vim.api.nvim_set_option_value, "foldcolumn", "0",       { win = new_win })
+
+  st.clean_view = { win = new_win, buf = new_buf }
+end
+
+function M._click_toggle_clean(_, _, _, _)
+  M.toggle_clean_view()
 end
 
 -- main refresh
@@ -305,7 +413,13 @@ function M.refresh(win)
   if not is_csv_buf(buf) then
     close_overlay(win)
     vim.api.nvim_buf_clear_namespace(buf, header_ns, 0, -1)
-    maybe_set_winbar(win)
+    -- also turn off winbar controls if we left a CSV buffer
+    if M.config.use_winbar_controls then
+      local cur = vim.wo[win].winbar or ""
+      if cur:match("csvcols") then
+        pcall(vim.api.nvim_set_option_value, "winbar", "", { scope = "local", win = win })
+      end
+    end
     return
   end
 
@@ -316,7 +430,10 @@ function M.refresh(win)
   if bottom <= top then
     close_overlay(win)
     vim.api.nvim_buf_clear_namespace(buf, header_ns, 0, -1)
-    maybe_set_winbar(win)
+    -- winbar controls
+    if M.config.use_winbar_controls then
+      pcall(vim.api.nvim_set_option_value, "winbar", M._winbar_for(win), { scope = "local", win = win })
+    end
     return
   end
 
@@ -336,7 +453,9 @@ function M.refresh(win)
   render_header(win, buf, sep, top)
 
   -- winbar controls
-  maybe_set_winbar(win)
+  if M.config.use_winbar_controls then
+    pcall(vim.api.nvim_set_option_value, "winbar", M._winbar_for(win), { scope = "local", win = win })
+  end
 end
 
 -- setup
@@ -416,6 +535,16 @@ function M.setup(opts)
     local w = vim.api.nvim_get_current_win()
     close_overlay(w)
   end, { desc = "Clear csvcols highlights/header in current buffer" })
+
+  -- Clean-view: command and default keymap
+  vim.api.nvim_create_user_command("CsvCleanToggle", function()
+    M.toggle_clean_view()
+  end, { desc = "Toggle clean spreadsheet-like view for current CSV/TSV buffer" })
+
+  if M.config.keymap ~= false then
+    vim.keymap.set('n', 'gC', function() require('csvcols').toggle_clean_view() end,
+      { desc = 'csvcols: toggle clean view' })
+  end
 end
 
 return M
