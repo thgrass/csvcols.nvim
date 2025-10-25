@@ -290,7 +290,7 @@ local function field_ranges(line, sep, max_cols)
   return ranges
 end
 
--- Render sticky header (existing behavior), aligned via textoff
+-- Render sticky header, aligned via textoff
 local function render_header(win, buf, sep, top)
   local n = get_header_n(buf)
 
@@ -428,10 +428,11 @@ local function build_padded_lines(lines, sep, widths)
       if cell:sub(1,1) == '"' and cell:sub(-1) == '"' then
         cell = cell:sub(2, -2)
       end
-      local w = vim.fn.strdisplaywidth(cell) or #cell
-      local pad = (widths[col_idx] or 0) - w
+      local disp  = vim.fn.strdisplaywidth(cell) or #cell
+      local bytes = #cell
+      local pad   = math.max(0, (widths[col_idx] or 0) - disp)
       parts[#parts+1] = cell .. string.rep(' ', pad + 2) -- 2 spaces between columns
-      x = x + w + pad + 2
+      x = x + bytes + pad + 2  -- advance by byte length + spaces (bytes)
     end
     result[#result+1] = table.concat(parts)
     starts_per_line[#starts_per_line+1] = starts
