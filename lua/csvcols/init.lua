@@ -1,13 +1,13 @@
 -- csvcols/init.lua
--- CSV/TSV column coloring + sticky header.
--- Sticky header is rendered via a per-window floating overlay at row 0.
--- Buttons in the winbar adjust the number of header lines per buffer.
--- Alignment uses the window's text offset (line numbers/sign/fold) so headers line up.
+-- CSV/TSV column coloring + sticky header + clean-view (tabular) overlay.
+-- Sticky header is a per-window floating overlay at row 0.
+-- Clean-view is another overlay that renders a padded, spreadsheet-like view
+-- that scrolls in sync with the main window and mirrors the cursor position.
 
 local M = {}
 
 -- Namespaces
-local ns         = vim.api.nvim_create_namespace("csvcols")         -- column hl
+local ns         = vim.api.nvim_create_namespace("csvcols")         -- column hl (main buf and overlays)
 local header_ns  = vim.api.nvim_create_namespace("csvcols_header")  -- (kept for safety)
 
 -- Augroup name (setup recreates it each time to avoid dupes)
@@ -29,7 +29,7 @@ M.config = {
   use_winbar_controls = true,  -- show [-] n [+] buttons in winbar
 
   -- Clean-view settings
-  -- When true, compute widths from the whole file. Set to false to use only the visible window.
+  -- true: compute column widths from whole file; false: from visible region (faster for huge files)
   clean_view_full_scan = true,
 
   -- Default keymap for clean-view toggle (gC). Set to false to disable.
@@ -54,7 +54,7 @@ local function inc_header_n(buf, d)
   set_header_n(buf, get_header_n(buf) + (d or 1))
 end
 
--- floating overlay manager (per-window)
+-- floating overlay manager (per-window) for sticky header
 -- overlays[winid] = { win = float_winid, buf = float_bufid, height = int }
 local overlays = {}
 local function close_overlay(win)
@@ -66,7 +66,19 @@ local function close_overlay(win)
   overlays[win] = nil
 end
 
--- Ensure a float exists at row 0 with given width/height and left offset col_off
+-- Clean-view overlay manager (separate from header overlays)
+-- clean_ov[winid] = { win = float_winid, buf = float_bufid }
+local clean_ov = {}
+local function close_clean_overlay(win)
+  local ov = clean_ov[win]
+  if not ov then return end
+  if ov.win and vim.api.nvim_win_is_valid(ov.win) then
+    pcall(vim.api.nvim_win_close, ov.win, true)
+  end
+  clean_ov[win] = nil
+end
+
+-- Ensure header float exists at row 0 with given width/height and left offset
 local function ensure_overlay(win, height, col_off, width)
   local ov = overlays[win]
   col_off = col_off or 0
@@ -80,11 +92,11 @@ local function ensure_overlay(win, height, col_off, width)
       col = col_off,
       width = width,
       height = height,
-      zindex = 50,
+      zindex = 50, -- header above clean-view
     })
     ov.height = height
 
-    -- keep window-local options in sync (no error if win disappeared)
+    -- keep window-local options in sync
     local ok_list, list_val = pcall(vim.api.nvim_get_option_value, "list", { win = win })
     if ok_list then pcall(vim.api.nvim_set_option_value, "list", list_val, { win = ov.win }) end
 
@@ -110,7 +122,7 @@ local function ensure_overlay(win, height, col_off, width)
     zindex = 50,
   })
 
-  -- minimal UI on the overlay **window**
+  -- minimal UI on header overlay
   pcall(vim.api.nvim_set_option_value, "wrap", false,            { win = float })
   pcall(vim.api.nvim_set_option_value, "cursorline", false,      { win = float })
   pcall(vim.api.nvim_set_option_value, "number", false,          { win = float })
@@ -118,17 +130,67 @@ local function ensure_overlay(win, height, col_off, width)
   pcall(vim.api.nvim_set_option_value, "signcolumn", "no",       { win = float })
   pcall(vim.api.nvim_set_option_value, "foldcolumn", "0",        { win = float })
 
-  -- copy window-local option(s) from the source window to the overlay window
+  -- copy list option
   local ok_list, list_val = pcall(vim.api.nvim_get_option_value, "list", { win = win })
   if ok_list then pcall(vim.api.nvim_set_option_value, "list", list_val, { win = float }) end
 
-  -- copy buffer-local option(s) from the source buffer to the overlay buffer
+  -- copy tabstop
   local src_buf = vim.api.nvim_win_get_buf(win)
   local ok_ts, ts_val = pcall(vim.api.nvim_get_option_value, "tabstop", { buf = src_buf })
   if ok_ts then pcall(vim.api.nvim_set_option_value, "tabstop", ts_val, { buf = buf }) end
 
   overlays[win] = { win = float, buf = buf, height = height }
   return overlays[win]
+end
+
+-- Ensure clean-view float exists over the text area
+local function ensure_clean_overlay(win, height, col_off, width)
+  local ov = clean_ov[win]
+  col_off = col_off or 0
+  width   = math.max(1, width or 1)
+
+  if ov and ov.win and vim.api.nvim_win_is_valid(ov.win) then
+    pcall(vim.api.nvim_win_set_config, ov.win, {
+      relative = "win",
+      win = win,
+      row = 0,                 -- full text area (header sits above with higher zindex)
+      col = col_off,
+      width = width,
+      height = height,
+      zindex = 40,             -- below header overlay
+    })
+    return ov
+  end
+
+  local buf = vim.api.nvim_create_buf(false, true) -- scratch, nofile
+  local float = vim.api.nvim_open_win(buf, false, {
+    relative = "win",
+    win = win,
+    row = 0,
+    col = col_off,
+    width = width,
+    height = height,
+    focusable = false,         -- behaves like viewer; we mirror cursor
+    style = "minimal",
+    noautocmd = true,
+    zindex = 40,
+  })
+
+  -- minimal UI on clean overlay
+  pcall(vim.api.nvim_set_option_value, "wrap", false,            { win = float })
+  pcall(vim.api.nvim_set_option_value, "cursorline", false,      { win = float })
+  pcall(vim.api.nvim_set_option_value, "number", false,          { win = float })
+  pcall(vim.api.nvim_set_option_value, "relativenumber", false,  { win = float })
+  pcall(vim.api.nvim_set_option_value, "signcolumn", "no",       { win = float })
+  pcall(vim.api.nvim_set_option_value, "foldcolumn", "0",        { win = float })
+
+  -- Inherit tabstop from source buf (for any rendering that depends on it)
+  local src_buf = vim.api.nvim_win_get_buf(win)
+  local ok_ts, ts_val = pcall(vim.api.nvim_get_option_value, "tabstop", { buf = src_buf })
+  if ok_ts then pcall(vim.api.nvim_set_option_value, "tabstop", ts_val, { buf = buf }) end
+
+  clean_ov[win] = { win = float, buf = buf }
+  return clean_ov[win]
 end
 
 -- helpers
@@ -198,12 +260,10 @@ local function field_ranges(line, sep, max_cols)
   return ranges
 end
 
--- Render sticky header via a floating window pinned to row 0 of the target window.
--- Alignment is handled by anchoring the float at the window's text offset ("textoff").
+-- Render sticky header (existing behavior), aligned via textoff
 local function render_header(win, buf, sep, top)
   local n = get_header_n(buf)
 
-  -- No header or we're at the very top -> close overlay
   if n <= 0 or top <= 0 then
     close_overlay(win)
     return
@@ -218,15 +278,12 @@ local function render_header(win, buf, sep, top)
   local upto = math.min(n, total)
   local header_lines = vim.api.nvim_buf_get_lines(buf, 0, upto, false)
 
-  -- Get exact on-screen left offset for buffer text area (line numbers/sign/fold)
   local info = vim.fn.getwininfo(win)[1]
   local col_off = (info and info.textoff) or 0
   local text_w  = math.max(1, ((info and info.width) or vim.api.nvim_win_get_width(win)) - col_off)
 
-  -- Create/resize overlay at correct horizontal offset
   local ov = ensure_overlay(win, upto, col_off, text_w)
 
-  -- Fill overlay buffer and colorize columns
   vim.api.nvim_buf_set_option(ov.buf, "modifiable", true)
   vim.api.nvim_buf_set_lines(ov.buf, 0, -1, false, header_lines)
   vim.api.nvim_buf_clear_namespace(ov.buf, ns, 0, -1)
@@ -237,7 +294,6 @@ local function render_header(win, buf, sep, top)
       local group = ("CsvCol%d"):format(((col_idx - 1) % #M.config.colors) + 1)
       local start_col, end_col = r[1], r[2]
       vim.api.nvim_buf_add_highlight(ov.buf, ns, group, i - 1, start_col, end_col)
-      -- draw separator highlight if present
       if col_idx < #ranges and end_col ~= -1 then
         vim.api.nvim_buf_add_highlight(ov.buf, ns, "CsvSep", i - 1, end_col, end_col + 1)
       end
@@ -248,7 +304,6 @@ local function render_header(win, buf, sep, top)
 end
 
 -- Build the winbar string (buttons and right-aligned tag).
--- NO string.format here, to avoid statusline '%' issues.
 function M._winbar_for(win)
   local buf = vim.api.nvim_win_get_buf(win)
   if not is_csv_buf(buf) or not M.config.use_winbar_controls then
@@ -291,118 +346,142 @@ function M._click_dec(_, _, _, _)
   M.refresh(win)
 end
 
--- ─────────────────────────────────────────────────────────────────────────────
--- Clean view implementation
--- Renders a padded, spreadsheet-like copy of the CSV/TSV in a scratch float.
--- Original buffer remains unchanged; toggle again to close.
-local function compute_column_widths(lines, sep)
-  local max_widths = {}
+-- ==========================
+-- Clean-view implementation
+-- ==========================
+
+-- Compute column widths (whole file or visible lines).
+local function compute_column_widths_for(buf, sep, top, bottom, full_scan)
+  local widths = {}
   local max_cols = M.config.max_columns or 64
+
+  local start_idx = 0
+  local end_idx   = vim.api.nvim_buf_line_count(buf)
+
+  if not full_scan then
+    start_idx = math.max(0, top)
+    end_idx   = math.max(start_idx, bottom)
+  end
+
+  local lines = vim.api.nvim_buf_get_lines(buf, start_idx, end_idx, false)
   for _, line in ipairs(lines) do
     local ranges = field_ranges(line, sep, max_cols)
     for col_idx, r in ipairs(ranges) do
-      local start_col, end_col = r[1], r[2]
-      local cell = (end_col == -1) and line:sub(start_col + 1) or line:sub(start_col + 1, end_col)
+      local s, e = r[1], r[2]
+      local cell = (e == -1) and line:sub(s + 1) or line:sub(s + 1, e)
       cell = cell:gsub('^%s*', ''):gsub('%s*$', '')
       if cell:sub(1,1) == '"' and cell:sub(-1) == '"' then
         cell = cell:sub(2, -2)
       end
       local w = vim.fn.strdisplaywidth(cell) or #cell
-      max_widths[col_idx] = math.max(max_widths[col_idx] or 0, w)
+      widths[col_idx] = math.max(widths[col_idx] or 0, w)
     end
   end
-  return max_widths
+  return widths
 end
 
+-- Build padded lines from raw lines and widths; also return per-column visual starts.
 local function build_padded_lines(lines, sep, widths)
   local result = {}
+  local starts_per_line = {} -- { {start_col0,start_col1,...}, ... } for cursor mapping
   local max_cols = #widths
   for _, line in ipairs(lines) do
     local ranges = field_ranges(line, sep, max_cols)
     local parts = {}
+    local starts = {}
+    local x = 0
     for col_idx, r in ipairs(ranges) do
-      local start_col, end_col = r[1], r[2]
-      local cell = (end_col == -1) and line:sub(start_col + 1) or line:sub(start_col + 1, end_col)
+      starts[col_idx] = x
+      local s, e = r[1], r[2]
+      local cell = (e == -1) and line:sub(s + 1) or line:sub(s + 1, e)
       cell = cell:gsub('^%s*', ''):gsub('%s*$', '')
       if cell:sub(1,1) == '"' and cell:sub(-1) == '"' then
         cell = cell:sub(2, -2)
       end
-      local pad = widths[col_idx] - (vim.fn.strdisplaywidth(cell) or #cell)
-      parts[#parts+1] = cell .. string.rep(' ', pad + 2) -- two spaces between cols
+      local w = vim.fn.strdisplaywidth(cell) or #cell
+      local pad = (widths[col_idx] or 0) - w
+      parts[#parts+1] = cell .. string.rep(' ', pad + 2) -- 2 spaces between columns
+      x = x + w + pad + 2
     end
     result[#result+1] = table.concat(parts)
+    starts_per_line[#starts_per_line+1] = starts
   end
-  return result
+  return result, starts_per_line
 end
 
-function M.toggle_clean_view()
-  local win = vim.api.nvim_get_current_win()
-  local buf = vim.api.nvim_win_get_buf(win)
-  if not is_csv_buf(buf) then
-    vim.notify("[csvcols] Clean view is only available for CSV/TSV buffers", vim.log.levels.WARN)
-    return
-  end
-
-  local st = bufstate(buf)
-  if st.clean_view then
-    local cv = st.clean_view
-    if cv.win and vim.api.nvim_win_is_valid(cv.win) then
-      vim.api.nvim_win_close(cv.win, true)
+-- Determine which CSV column the cursor is on (0-based index) for a given line.
+local function cursor_col_index(line, sep, max_cols, cur_byte_col0)
+  local ranges = field_ranges(line, sep, max_cols)
+  for idx, r in ipairs(ranges) do
+    local s, e = r[1], r[2]
+    local stop = (e == -1) and math.huge or e
+    if cur_byte_col0 >= s and cur_byte_col0 <= stop then
+      return idx
     end
-    st.clean_view = nil
-    return
   end
+  return 1
+end
 
-  local total = vim.api.nvim_buf_line_count(buf)
-  local top, bottom = 0, total
-  if not M.config.clean_view_full_scan then
-    top = vim.fn.line("w0") - 1
-    bottom = vim.fn.line("w$")
-  end
-
-  local lines = vim.api.nvim_buf_get_lines(buf, top, bottom, false)
-  local sep = get_sep(buf)
-  local widths = compute_column_widths(lines, sep)
-  local padded = build_padded_lines(lines, sep, widths)
-
-  local new_buf = vim.api.nvim_create_buf(false, true) -- scratch
-  vim.api.nvim_buf_set_lines(new_buf, 0, -1, false, padded)
-  vim.api.nvim_buf_set_option(new_buf, "modifiable", false)
-
+-- Render / update the clean-view overlay for the current window.
+local function render_clean_view(win, buf, sep, top, bottom)
   local info = vim.fn.getwininfo(win)[1]
   local col_off = (info and info.textoff) or 0
+  local text_w  = math.max(1, ((info and info.width) or vim.api.nvim_win_get_width(win)) - col_off)
+  local text_h  = math.max(1, vim.api.nvim_win_get_height(win))
 
-  local width = 0
-  for _, w in ipairs(widths) do width = width + w + 2 end
-  local max_w = vim.api.nvim_win_get_width(win) - col_off
-  if width > max_w then width = max_w end
+  local st = bufstate(buf)
+  st.clean_active = true
 
-  local height = math.min(#padded, vim.api.nvim_win_get_height(win))
-  local new_win = vim.api.nvim_open_win(new_buf, false, {
-    relative = "win",
-    win = win,
-    row = 0,
-    col = col_off,
-    width = math.max(1, width),
-    height = math.max(1, height),
-    focusable = false,
-    style = "minimal",
-    noautocmd = true,
-    zindex = 60,
-  })
+  -- Widths: either whole file (cached per changedtick) or visible region each time
+  local full = M.config.clean_view_full_scan
+  local changedtick = vim.api.nvim_buf_get_changedtick(buf)
+  if full then
+    if not st.clean_widths or st.clean_widths_tick ~= changedtick then
+      st.clean_widths = compute_column_widths_for(buf, sep, top, bottom, true)
+      st.clean_widths_tick = changedtick
+    end
+  else
+    st.clean_widths = compute_column_widths_for(buf, sep, top, bottom, false)
+    st.clean_widths_tick = changedtick
+  end
+  local widths = st.clean_widths or {}
 
-  pcall(vim.api.nvim_set_option_value, "wrap", false,           { win = new_win })
-  pcall(vim.api.nvim_set_option_value, "cursorline", false,     { win = new_win })
-  pcall(vim.api.nvim_set_option_value, "number", false,         { win = new_win })
-  pcall(vim.api.nvim_set_option_value, "relativenumber", false, { win = new_win })
-  pcall(vim.api.nvim_set_option_value, "signcolumn", "no",      { win = new_win })
-  pcall(vim.api.nvim_set_option_value, "foldcolumn", "0",       { win = new_win })
+  -- Visible lines -> padded copy
+  local lines = vim.api.nvim_buf_get_lines(buf, top, bottom, false)
+  local padded, starts_per_line = build_padded_lines(lines, sep, widths)
 
-  st.clean_view = { win = new_win, buf = new_buf }
-end
+  -- Open/resize overlay
+  local ov = ensure_clean_overlay(win, text_h, col_off, text_w)
 
-function M._click_toggle_clean(_, _, _, _)
-  M.toggle_clean_view()
+  -- Fill and colorize
+  vim.api.nvim_buf_set_option(ov.buf, "modifiable", true)
+  vim.api.nvim_buf_set_lines(ov.buf, 0, -1, false, padded)
+  vim.api.nvim_buf_clear_namespace(ov.buf, ns, 0, -1)
+
+  for i, line in ipairs(lines) do
+    local ranges = field_ranges(line, sep, M.config.max_columns)
+    for col_idx, r in ipairs(ranges) do
+      local group = ("CsvCol%d"):format(((col_idx - 1) % #M.config.colors) + 1)
+      local start_x = (starts_per_line[i] and starts_per_line[i][col_idx]) or 0
+      local next_start = (starts_per_line[i] and starts_per_line[i][col_idx + 1])
+      local end_x = (next_start and next_start) or -1
+      vim.api.nvim_buf_add_highlight(ov.buf, ns, group, i - 1, start_x, end_x)
+    end
+  end
+
+  vim.api.nvim_buf_set_option(ov.buf, "modifiable", false)
+
+  -- Mirror cursor into clean view (start of the current cell)
+  local cur = vim.api.nvim_win_get_cursor(win)   -- {line1, col0}
+  local cur_row0 = cur[1] - 1
+  local cur_col0 = cur[2]
+  if cur_row0 >= top and cur_row0 < bottom then
+    local line = vim.api.nvim_buf_get_lines(buf, cur_row0, cur_row0 + 1, false)[1] or ""
+    local col_idx = cursor_col_index(line, sep, M.config.max_columns, cur_col0)
+    local rel = cur_row0 - top
+    local sx = (starts_per_line[rel + 1] and starts_per_line[rel + 1][col_idx]) or 0
+    pcall(vim.api.nvim_win_set_cursor, ov.win, { rel + 1, sx })
+  end
 end
 
 -- main refresh
@@ -412,8 +491,9 @@ function M.refresh(win)
 
   if not is_csv_buf(buf) then
     close_overlay(win)
+    close_clean_overlay(win)
     vim.api.nvim_buf_clear_namespace(buf, header_ns, 0, -1)
-    -- also turn off winbar controls if we left a CSV buffer
+    -- Clear our winbar if present
     if M.config.use_winbar_controls then
       local cur = vim.wo[win].winbar or ""
       if cur:match("csvcols") then
@@ -429,8 +509,8 @@ function M.refresh(win)
 
   if bottom <= top then
     close_overlay(win)
+    close_clean_overlay(win)
     vim.api.nvim_buf_clear_namespace(buf, header_ns, 0, -1)
-    -- winbar controls
     if M.config.use_winbar_controls then
       pcall(vim.api.nvim_set_option_value, "winbar", M._winbar_for(win), { scope = "local", win = win })
     end
@@ -452,10 +532,38 @@ function M.refresh(win)
   -- sticky header (float, aligned via textoff)
   render_header(win, buf, sep, top)
 
+  -- clean-view (if active) – scrolls and mirrors cursor
+  local st = bufstate(buf)
+  if st.clean_active then
+    render_clean_view(win, buf, sep, top, bottom)
+  else
+    close_clean_overlay(win)
+  end
+
   -- winbar controls
   if M.config.use_winbar_controls then
     pcall(vim.api.nvim_set_option_value, "winbar", M._winbar_for(win), { scope = "local", win = win })
   end
+end
+
+-- Toggle clean view
+function M.toggle_clean_view()
+  local win = vim.api.nvim_get_current_win()
+  local buf = vim.api.nvim_win_get_buf(win)
+  if not is_csv_buf(buf) then
+    vim.notify("[csvcols] Clean view is only available for CSV/TSV buffers", vim.log.levels.WARN)
+    return
+  end
+  local st = bufstate(buf)
+  st.clean_active = not st.clean_active
+  if not st.clean_active then
+    close_clean_overlay(win)
+  end
+  M.refresh(win)
+end
+
+function M._click_toggle_clean(_, _, _, _)
+  M.toggle_clean_view()
 end
 
 -- setup
@@ -473,7 +581,7 @@ function M.setup(opts)
       group = augroup,
       pattern = "*",  -- run everywhere; refresh() bails for non-CSV
       callback = function() M.refresh(0) end,
-      desc = "csvcols: colorize CSV/TSV columns & sticky header (float)",
+      desc = "csvcols: colorize CSV/TSV columns, sticky header & clean-view",
     }
   )
 
@@ -483,9 +591,9 @@ function M.setup(opts)
     pattern = "*",
     callback = function(args)
       local w = tonumber(args.match)
-      if w then close_overlay(w) end
+      if w then close_overlay(w); close_clean_overlay(w) end
     end,
-    desc = "csvcols: cleanup overlay on window close",
+    desc = "csvcols: cleanup overlays on window close",
   })
 
   -- Commands
@@ -533,8 +641,8 @@ function M.setup(opts)
     vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
     vim.api.nvim_buf_clear_namespace(buf, header_ns, 0, -1)
     local w = vim.api.nvim_get_current_win()
-    close_overlay(w)
-  end, { desc = "Clear csvcols highlights/header in current buffer" })
+    close_overlay(w); close_clean_overlay(w)
+  end, { desc = "Clear csvcols highlights/header/clean-view in current buffer" })
 
   -- Clean-view: command and default keymap
   vim.api.nvim_create_user_command("CsvCleanToggle", function()
