@@ -143,6 +143,37 @@ local function ensure_overlay(win, height, col_off, width)
   return overlays[win]
 end
 
+-- Enable/restore horizontal panning so cursor can move beyond EOL in clean-view.
+local function apply_clean_scroll_opts(win, enable)
+  local buf = vim.api.nvim_win_get_buf(win)
+  local st  = bufstate(buf)
+  if enable then
+    if not st._saved_scroll then
+      st._saved_scroll = {
+        wrap         = vim.api.nvim_get_option_value("wrap",         { win = win }),
+        virtualedit  = vim.api.nvim_get_option_value("virtualedit",  { win = win }),
+        sidescroll   = vim.api.nvim_get_option_value("sidescroll",   { win = win }),
+        sidescrolloff= vim.api.nvim_get_option_value("sidescrolloff",{ win = win }),
+      }
+    end
+    -- turn on true horizontal panning
+    pcall(vim.api.nvim_set_option_value, "wrap",         false, { win = win })
+    pcall(vim.api.nvim_set_option_value, "virtualedit",  "all", { win = win })
+    pcall(vim.api.nvim_set_option_value, "sidescroll",   1,     { win = win })
+    pcall(vim.api.nvim_set_option_value, "sidescrolloff",4,     { win = win })
+  else
+    local sv = st._saved_scroll
+    if sv then
+      pcall(vim.api.nvim_set_option_value, "wrap",         sv.wrap,         { win = win })
+      pcall(vim.api.nvim_set_option_value, "virtualedit",  sv.virtualedit,  { win = win })
+      pcall(vim.api.nvim_set_option_value, "sidescroll",   sv.sidescroll,   { win = win })
+      pcall(vim.api.nvim_set_option_value, "sidescrolloff",sv.sidescrolloff,{ win = win })
+      st._saved_scroll = nil
+    end
+  end
+end
+
+
 -- Ensure clean-view float exists over the text area
 local function ensure_clean_overlay(win, height, col_off, width)
   local ov = clean_ov[win]
@@ -492,6 +523,7 @@ function M.refresh(win)
   if not is_csv_buf(buf) then
     close_overlay(win)
     close_clean_overlay(win)
+    apply_clean_scroll_opts(win, false)
     vim.api.nvim_buf_clear_namespace(buf, header_ns, 0, -1)
     -- Clear our winbar if present
     if M.config.use_winbar_controls then
@@ -556,7 +588,10 @@ function M.toggle_clean_view()
   end
   local st = bufstate(buf)
   st.clean_active = not st.clean_active
-  if not st.clean_active then
+  if st.clean_active then
+    apply_clean_scroll_opts(win, true)
+  else
+    apply_clean_scroll_opts(win, false)
     close_clean_overlay(win)
   end
   M.refresh(win)
