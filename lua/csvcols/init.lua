@@ -152,27 +152,26 @@ local function apply_clean_scroll_opts(win, enable)
       st._saved_scroll = {
         wrap         = vim.api.nvim_get_option_value("wrap",         { win = win }),
         virtualedit  = vim.api.nvim_get_option_value("virtualedit",  { win = win }),
-        sidescroll   = vim.api.nvim_get_option_value("sidescroll",   { win = win }),
-        sidescrolloff= vim.api.nvim_get_option_value("sidescrolloff",{ win = win }),
+        sidescroll   = vim.api.nvim_get_option_value("sidescroll",   {}),
+        sidescrolloff= vim.api.nvim_get_option_value("sidescrolloff",{}),
       }
     end
     -- turn on true horizontal panning
     pcall(vim.api.nvim_set_option_value, "wrap",         false, { win = win })
     pcall(vim.api.nvim_set_option_value, "virtualedit",  "all", { win = win })
-    pcall(vim.api.nvim_set_option_value, "sidescroll",   1,     { win = win })
-    pcall(vim.api.nvim_set_option_value, "sidescrolloff",4,     { win = win })
+    pcall(vim.api.nvim_set_option_value, "sidescroll",   1,     {})
+    pcall(vim.api.nvim_set_option_value, "sidescrolloff",4,     {})
   else
     local sv = st._saved_scroll
     if sv then
       pcall(vim.api.nvim_set_option_value, "wrap",         sv.wrap,         { win = win })
       pcall(vim.api.nvim_set_option_value, "virtualedit",  sv.virtualedit,  { win = win })
-      pcall(vim.api.nvim_set_option_value, "sidescroll",   sv.sidescroll,   { win = win })
-      pcall(vim.api.nvim_set_option_value, "sidescrolloff",sv.sidescrolloff,{ win = win })
+      pcall(vim.api.nvim_set_option_value, "sidescroll",   sv.sidescroll,   {})
+      pcall(vim.api.nvim_set_option_value, "sidescrolloff",sv.sidescrolloff,{})
       st._saved_scroll = nil
     end
   end
 end
-
 
 -- Ensure clean-view float exists over the text area
 local function ensure_clean_overlay(win, height, col_off, width)
