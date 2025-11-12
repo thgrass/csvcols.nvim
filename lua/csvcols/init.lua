@@ -408,6 +408,81 @@ local function field_ranges(line, sep, max_cols)
 	return ranges
 end
 
+local function compute_column_widths_for(buf, sep, top, bottom, full_scan)
+	local widths    = {}
+	local max_cols  = M.config.max_columns or 64
+
+	local start_idx = 0
+	local end_idx   = vim.api.nvim_buf_line_count(buf)
+
+	if not full_scan then
+		start_idx = math.max(0, top or 0)
+		end_idx   = math.max(start_idx, bottom or start_idx)
+	end
+
+	local lines = vim.api.nvim_buf_get_lines(buf, start_idx, end_idx, false)
+	for _, line in ipairs(lines) do
+		local ranges = field_ranges(line, sep, max_cols)
+		for col_idx, r in ipairs(ranges) do
+			local s, e = r[1], r[2]
+			local cell = (e == -1) and line:sub(s + 1) or line:sub(s + 1, e)
+
+			-- trim spaces
+			cell = cell:gsub("^%s*", ""):gsub("%s*$", "")
+
+			-- unquote RFC-4180 style quoted fields
+			if cell:sub(1, 1) == '"' and cell:sub(-1) == '"' then
+				cell = cell:sub(2, -2)
+				cell = cell:gsub('""', '"')
+			end
+
+			local w = vim.fn.strdisplaywidth(cell) or #cell
+			widths[col_idx] = math.max(widths[col_idx] or 0, w)
+		end
+	end
+	return widths
+end
+
+local function build_padded_lines(lines, sep, widths)
+	local result = {}
+	local starts_per_line = {} -- { {start_col0,start_col1,...}, ... }
+	local max_cols = math.max(#widths, 1)
+	local gap = 2        -- spaces between columns
+
+	for _, line in ipairs(lines) do
+		local ranges = field_ranges(line, sep, max_cols)
+		local parts = {}
+		local starts = {}
+		local x = 0
+
+		for col_idx, r in ipairs(ranges) do
+			starts[col_idx] = x
+			local s, e = r[1], r[2]
+			local cell = (e == -1) and line:sub(s + 1) or line:sub(s + 1, e)
+
+			-- trim + unquote
+			cell = cell:gsub("^%s*", ""):gsub("%s*$", "")
+			if cell:sub(1, 1) == '"' and cell:sub(-1) == '"' then
+				cell = cell:sub(2, -2)
+				cell = cell:gsub('""', '"')
+			end
+
+			local disp      = vim.fn.strdisplaywidth(cell) or #cell
+			local pad       = math.max(0, (widths[col_idx] or 0) - disp)
+			parts[#parts + 1] = cell .. string.rep(" ", pad + gap)
+
+			-- advance x by *byte* length + pad + gap (consistent with use in extmarks)
+			x               = x + #cell + pad + gap
+		end
+
+		local padded = table.concat(parts)
+		result[#result + 1] = padded
+		starts_per_line[#starts_per_line + 1] = starts
+	end
+
+	return result, starts_per_line
+end
+
 -- Render sticky header, aligned via textoff
 local function render_header(win, buf, sep, top)
 	local n = get_header_n(buf)
@@ -432,7 +507,7 @@ local function render_header(win, buf, sep, top)
 
 	local ov           = ensure_overlay(win, upto, col_off, text_w)
 
-	vim.api.nvim_buf_set_option(ov.buf, "modifiable", true)
+	vim.api.nvim_set_option_value("modifiable", true, { buf = ov.buf })
 	vim.api.nvim_buf_clear_namespace(ov.buf, ns, 0, -1)
 
 	local st = bufstate(buf)
@@ -465,7 +540,7 @@ local function render_header(win, buf, sep, top)
 			end
 		end
 	else
-		-- Old behavior: raw header lines + direct ranges
+		-- "Raw view": raw header lines + direct ranges
 		vim.api.nvim_buf_set_lines(ov.buf, 0, -1, false, header_lines)
 		for i, line in ipairs(header_lines) do
 			local ranges = field_ranges(line, sep, M.config.max_columns)
@@ -491,7 +566,7 @@ local function render_header(win, buf, sep, top)
 		end
 	end
 
-	vim.api.nvim_buf_set_option(ov.buf, "modifiable", false)
+	vim.api.nvim_set_option_value("modifiable", false, { buf = ov.buf })
 end
 
 -- Build the winbar string (buttons and right-aligned tag).
@@ -646,7 +721,7 @@ local function render_clean_view(win, buf, sep, top, bottom)
 	local ov = ensure_clean_overlay(win, text_h, col_off, text_w)
 
 	-- Fill and colorize
-	vim.api.nvim_buf_set_option(ov.buf, "modifiable", true)
+	vim.api.nvim_set_option_value("modifiable", true, { buf = ov.buf })
 	vim.api.nvim_buf_set_lines(ov.buf, 0, -1, false, padded)
 	vim.api.nvim_buf_clear_namespace(ov.buf, ns, 0, -1)
 
@@ -668,7 +743,7 @@ local function render_clean_view(win, buf, sep, top, bottom)
 		end
 	end
 
-	vim.api.nvim_buf_set_option(ov.buf, "modifiable", false)
+	vim.api.nvim_set_option_value("modifiable", false, { buf = ov.buf })
 
 	-- Mirror cursor into clean view (start of the current cell)
 	local cur = vim.api.nvim_win_get_cursor(win) -- {line1, col0}
