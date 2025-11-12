@@ -245,6 +245,58 @@ local function ensure_clean_overlay(win, height, col_off, width)
 	return clean_ov[win]
 end
 
+-- Helpers for horizontal scrolling and slicing lines by display width.
+-- Return the text offset (excluded columns) and the text area width for window 'win'.
+local function win_text_area(win)
+	local info    = vim.fn.getwininfo(win)[1]
+	local col_off = (info and info.textoff) or 0
+	local text_w  = math.max(1, ((info and info.width) or vim.api.nvim_win_get_width(win)) - col_off)
+	return col_off, text_w
+end
+
+-- Return the leftmost display column of window 'win' (horizontal scroll).
+local function win_leftcol(win)
+	local v = vim.fn.winsaveview()
+	return (v and v.leftcol) or 0
+end
+
+-- Slice a line by display columns [leftcol, leftcol+width) and return the
+-- substring plus the byte offset into the original line.
+local function slice_display(line, leftcol, width)
+	if width <= 0 then return "", 0 end
+	if not line or line == "" then return "", 0 end
+	local disp = 0
+	local i = 1
+	while i <= #line and disp < leftcol do
+		local ch = line:sub(i, i)
+		disp = disp + (vim.fn.strdisplaywidth(ch) or 1)
+		i = i + 1
+	end
+	local start_byte = i
+	local j = i
+	local target = leftcol + width
+	while j <= #line and disp < target do
+		local ch = line:sub(j, j)
+		disp = disp + (vim.fn.strdisplaywidth(ch) or 1)
+		j = j + 1
+	end
+	return line:sub(start_byte, j - 1), (start_byte - 1)
+end
+
+-- Add a one-line highlight via extmark for range [s_byte,e_byte] on row `row`
+-- (handles end-of-line when e_byte == -1).
+local function add_hl_line(buf, ns_id, hl_group, row, s_byte, e_byte)
+	local line = vim.api.nvim_buf_get_lines(buf, row, row + 1, false)[1] or ""
+	local e = (e_byte == -1) and #line or e_byte
+	vim.api.nvim_buf_set_extmark(buf, ns_id, row, s_byte, {
+		end_row  = row,
+		end_col  = e,
+		hl_group = hl_group,
+
+		hl_mode  = "combine",
+	})
+end
+
 -- helpers
 local function is_csv_buf(buf)
 	-- fast-path: explicit filetype or extension
@@ -447,7 +499,7 @@ local function build_padded_lines(lines, sep, widths)
 	local result = {}
 	local starts_per_line = {} -- { {start_col0,start_col1,...}, ... }
 	local max_cols = math.max(#widths, 1)
-	local gap = 2        -- spaces between columns
+	local gap = 2       -- spaces between columns
 
 	for _, line in ipairs(lines) do
 		local ranges = field_ranges(line, sep, max_cols)
@@ -467,12 +519,12 @@ local function build_padded_lines(lines, sep, widths)
 				cell = cell:gsub('""', '"')
 			end
 
-			local disp      = vim.fn.strdisplaywidth(cell) or #cell
-			local pad       = math.max(0, (widths[col_idx] or 0) - disp)
+			local disp        = vim.fn.strdisplaywidth(cell) or #cell
+			local pad         = math.max(0, (widths[col_idx] or 0) - disp)
 			parts[#parts + 1] = cell .. string.rep(" ", pad + gap)
 
 			-- advance x by *byte* length + pad + gap (consistent with use in extmarks)
-			x               = x + #cell + pad + gap
+			x                 = x + #cell + pad + gap
 		end
 
 		local padded = table.concat(parts)
@@ -483,89 +535,110 @@ local function build_padded_lines(lines, sep, widths)
 	return result, starts_per_line
 end
 
--- Render sticky header, aligned via textoff
+-- Render sticky header, aligned via textoff, with horizontal scrolling support.
 local function render_header(win, buf, sep, top)
 	local n = get_header_n(buf)
-
 	if n <= 0 or top <= 0 then
 		close_overlay(win)
 		return
 	end
-
 	local total = vim.api.nvim_buf_line_count(buf)
 	if total == 0 then
 		close_overlay(win)
 		return
 	end
-
-	local upto         = math.min(n, total)
+	-- Source header lines
+	local upto = math.min(n, total)
 	local header_lines = vim.api.nvim_buf_get_lines(buf, 0, upto, false)
-
-	local info         = vim.fn.getwininfo(win)[1]
-	local col_off      = (info and info.textoff) or 0
-	local text_w       = math.max(1, ((info and info.width) or vim.api.nvim_win_get_width(win)) - col_off)
-
-	local ov           = ensure_overlay(win, upto, col_off, text_w)
-
+	-- Window geometry and horizontal scroll
+	local col_off, text_w = win_text_area(win)
+	local left = win_leftcol(win)
+	-- Ensure/resize overlay
+	local ov = ensure_overlay(win, upto, col_off, text_w)
 	vim.api.nvim_set_option_value("modifiable", true, { buf = ov.buf })
 	vim.api.nvim_buf_clear_namespace(ov.buf, ns, 0, -1)
-
 	local st = bufstate(buf)
 	if st.clean_active then
-		-- Use same widths as clean-view for padded header
+		-- Clean view: compute widths (whole file) if changed
 		if not st.clean_widths or st.clean_widths_tick ~= vim.api.nvim_buf_get_changedtick(buf) then
 			st.clean_widths = compute_column_widths_for(buf, sep, top, vim.fn.line("w$"), true)
 			st.clean_widths_tick = vim.api.nvim_buf_get_changedtick(buf)
 		end
-
+		-- Build padded header lines and per-column starts
 		local padded, starts_per_line = build_padded_lines(header_lines, sep, st.clean_widths or {})
-		vim.api.nvim_buf_set_lines(ov.buf, 0, -1, false, padded)
-
-		-- Colorize by column using padded starts
-		for i, raw in ipairs(header_lines) do
-			local ranges = field_ranges(raw, sep, M.config.max_columns)
-			for col_idx, _ in ipairs(ranges) do
-				local group = ("CsvCol%d"):format(((col_idx - 1) % #M.config.colors) + 1)
-				local sx = (starts_per_line[i] and starts_per_line[i][col_idx]) or 0
-				local next_start = (starts_per_line[i] and starts_per_line[i][col_idx + 1])
-				local ex = (next_start and next_start) or -1 -- EOL
-
-				-- one-line extmark highlight (replacement for nvim_buf_add_highlight)
-				vim.api.nvim_buf_set_extmark(ov.buf, ns, i - 1, sx, {
-					end_row  = i - 1,
-					end_col  = (ex == -1 and #(padded[i] or "") or ex),
-					hl_group = group,
-					hl_mode  = "combine",
-				})
+		-- Slice each padded header line to visible region
+		local sliced = {}
+		local slice_offsets = {}
+		for i, pl in ipairs(padded) do
+			local s_txt, s_off = slice_display(pl, left, text_w)
+			sliced[i] = s_txt
+			slice_offsets[i] = s_off
+		end
+		vim.api.nvim_buf_set_lines(ov.buf, 0, -1, false, sliced)
+		-- Colorize by column using padded starts and slice offsets
+		for i, _ in ipairs(header_lines) do
+			local starts   = starts_per_line[i] or {}
+			local s_off    = slice_offsets[i] or 0
+			local line_txt = sliced[i] or ""
+			for col_idx = 1, #starts do
+				local group      = ("CsvCol%d"):format(((col_idx - 1) % #M.config.colors) + 1)
+				local sx         = (starts[col_idx] or 0) - s_off
+				local next_start = starts[col_idx + 1]
+				local nx         = (next_start and (next_start - s_off)) or -1
+				if nx == -1 then
+					if sx < #line_txt then
+						add_hl_line(ov.buf, ns, group, i - 1, math.max(0, sx), -1)
+					end
+				else
+					if nx > 0 and sx < #line_txt then
+						add_hl_line(ov.buf, ns, group, i - 1, math.max(0, sx), math.max(0, nx))
+					end
+				end
 			end
 		end
 	else
-		-- "Raw view": raw header lines + direct ranges
-		vim.api.nvim_buf_set_lines(ov.buf, 0, -1, false, header_lines)
-		for i, line in ipairs(header_lines) do
-			local ranges = field_ranges(line, sep, M.config.max_columns)
+		-- Normal view: slice raw header lines and highlight ranges within slice
+		local sliced = {}
+		local slice_offsets = {}
+		for i, raw in ipairs(header_lines) do
+			local s_txt, s_off = slice_display(raw, left, text_w)
+			sliced[i] = s_txt
+			slice_offsets[i] = s_off
+		end
+		vim.api.nvim_buf_set_lines(ov.buf, 0, -1, false, sliced)
+		for i, raw in ipairs(header_lines) do
+			local ranges = field_ranges(raw, sep, M.config.max_columns)
+			local s_off  = slice_offsets[i] or 0
+			local vis    = sliced[i] or ""
 			for col_idx, r in ipairs(ranges) do
 				local group = ("CsvCol%d"):format(((col_idx - 1) % #M.config.colors) + 1)
-				local s, e = r[1], r[2]
-				vim.api.nvim_buf_set_extmark(ov.buf, ns, i - 1, s, {
-					end_row  = i - 1,
-					end_col  = (e == -1 and #line or e),
-					hl_group = group,
-					hl_mode  = "combine",
-				})
+				local s, e  = r[1], r[2]
+				local vs    = s - s_off
+				local ve    = (e == -1) and -1 or (e - s_off)
+				if ve == -1 then
+					if vs < #vis then
+						add_hl_line(ov.buf, ns, group, i - 1, math.max(0, vs), -1)
+					end
+				else
+					if ve > 0 and vs < #vis then
+						add_hl_line(ov.buf, ns, group, i - 1, math.max(0, vs), math.max(0, ve))
+					end
+				end
+				-- highlight separators if visible
 				if col_idx < #ranges and e ~= -1 then
-					-- Separator single-char highlight
-					vim.api.nvim_buf_set_extmark(ov.buf, ns, i - 1, e, {
-						end_row  = i - 1,
-						end_col  = e + 1,
-						hl_group = "CsvSep",
-						hl_mode  = "combine",
-					})
+					local sep_col = e - s_off
+					if sep_col >= 0 and sep_col < #vis then
+						vim.api.nvim_buf_set_extmark(ov.buf, ns, i - 1, sep_col, {
+							end_row  = i - 1,
+							end_col  = sep_col + 1,
+							hl_group = "CsvSep",
+							hl_mode  = "combine",
+						})
+					end
 				end
 			end
 		end
 	end
-
 	vim.api.nvim_set_option_value("modifiable", false, { buf = ov.buf })
 end
 
@@ -615,66 +688,6 @@ end
 -- ==========================
 -- Clean-view implementation
 -- ==========================
-
--- Compute column widths (whole file or visible lines).
-local function compute_column_widths_for(buf, sep, top, bottom, full_scan)
-	local widths    = {}
-	local max_cols  = M.config.max_columns or 64
-
-	local start_idx = 0
-	local end_idx   = vim.api.nvim_buf_line_count(buf)
-
-	if not full_scan then
-		start_idx = math.max(0, top)
-		end_idx   = math.max(start_idx, bottom)
-	end
-
-	local lines = vim.api.nvim_buf_get_lines(buf, start_idx, end_idx, false)
-	for _, line in ipairs(lines) do
-		local ranges = field_ranges(line, sep, max_cols)
-		for col_idx, r in ipairs(ranges) do
-			local s, e = r[1], r[2]
-			local cell = (e == -1) and line:sub(s + 1) or line:sub(s + 1, e)
-			cell = cell:gsub('^%s*', ''):gsub('%s*$', '')
-			if cell:sub(1, 1) == '"' and cell:sub(-1) == '"' then
-				cell = cell:sub(2, -2)
-			end
-			local w = vim.fn.strdisplaywidth(cell) or #cell
-			widths[col_idx] = math.max(widths[col_idx] or 0, w)
-		end
-	end
-	return widths
-end
-
--- Build padded lines from raw lines and widths; also return per-column visual starts.
-local function build_padded_lines(lines, sep, widths)
-	local result = {}
-	local starts_per_line = {} -- { {start_col0,start_col1,...}, ... } for cursor mapping
-	local max_cols = #widths
-	for _, line in ipairs(lines) do
-		local ranges = field_ranges(line, sep, max_cols)
-		local parts = {}
-		local starts = {}
-		local x = 0
-		for col_idx, r in ipairs(ranges) do
-			starts[col_idx] = x
-			local s, e = r[1], r[2]
-			local cell = (e == -1) and line:sub(s + 1) or line:sub(s + 1, e)
-			cell = cell:gsub('^%s*', ''):gsub('%s*$', '')
-			if cell:sub(1, 1) == '"' and cell:sub(-1) == '"' then
-				cell = cell:sub(2, -2)
-			end
-			local disp        = vim.fn.strdisplaywidth(cell) or #cell
-			local bytes       = #cell
-			local pad         = math.max(0, (widths[col_idx] or 0) - disp)
-			parts[#parts + 1] = cell .. string.rep(' ', pad + 2) -- 2 spaces between columns
-			x                 = x + bytes + pad + 2 -- advance by byte length + spaces (bytes)
-		end
-		result[#result + 1] = table.concat(parts)
-		starts_per_line[#starts_per_line + 1] = starts
-	end
-	return result, starts_per_line
-end
 
 -- Determine which CSV column the cursor is on (0-based index) for a given line.
 local function cursor_col_index(line, sep, max_cols, cur_byte_col0)
@@ -736,8 +749,10 @@ local function render_clean_view(win, buf, sep, top, bottom)
 				{
 					end_row = i - 1,
 					end_col = (end_x == -1 and #(vim.api.nvim_buf_get_lines(ov.buf, i - 1, i, false)[1] or "") or end_x),
+
 					hl_group =
 					    group,
+
 					hl_mode = "combine"
 				})
 		end
@@ -804,8 +819,10 @@ function M.refresh(win)
 				{
 					end_row = top + i - 1,
 					end_col = (end_col == -1 and #(vim.api.nvim_buf_get_lines(buf, top + i - 1, top + i, false)[1] or "") or end_col),
+
 					hl_group =
 					    group,
+
 					hl_mode = "combine"
 				})
 		end
