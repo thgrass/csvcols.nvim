@@ -4,5 +4,12 @@ if vim.g.loaded_csvcols then return end
 vim.g.loaded_csvcols = true
 
 pcall(function()
-  require("csvcols").setup()
+	require("csvcols").setup()
 end)
+
+vim.filetype.add({
+	extension = {
+		tsv = "tsv",
+		csv = "csv",
+	},
+})
