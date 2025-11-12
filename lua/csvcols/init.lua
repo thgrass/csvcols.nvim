@@ -17,7 +17,7 @@ local AUGROUP_NAME = "csvcols_autocmds"
 M.config           = {
 	colors                  = {
 		"#2e7d32", "#1565c0", "#ad1457", "#ef6c00", "#6a1b9a",
-		"#00838f", "#827717", "#7b1fa2", "#37474f", "#558b2f",
+		"#00838f", "#827717", "#441fa2", "#37474f", "#558b2f",
 		"#c62828", "#283593", "#00897b", "#5d4037", "#1976d2",
 	},
 	mode                    = "bg", -- "bg" or "fg"
@@ -287,12 +287,20 @@ end
 -- (handles end-of-line when e_byte == -1).
 local function add_hl_line(buf, ns_id, hl_group, row, s_byte, e_byte)
 	local line = vim.api.nvim_buf_get_lines(buf, row, row + 1, false)[1] or ""
-	local e = (e_byte == -1) and #line or e_byte
+	local line_len = #line
+	local e
+	if e_byte == -1 then
+		e = line_len
+	else
+		e = math.min(e_byte, line_len)
+	end
+	local s = math.max(0, math.min(s_byte, line_len))
+	-- Only place highlight if start < end
+	if s >= e then return end
 	vim.api.nvim_buf_set_extmark(buf, ns_id, row, s_byte, {
 		end_row  = row,
 		end_col  = e,
 		hl_group = hl_group,
-
 		hl_mode  = "combine",
 	})
 end
