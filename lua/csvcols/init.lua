@@ -15,31 +15,38 @@ local AUGROUP_NAME = "csvcols_autocmds"
 
 -- Config (defaults)
 M.config           = {
-	colors                = {
+	colors                  = {
 		"#2e7d32", "#1565c0", "#ad1457", "#ef6c00", "#6a1b9a",
 		"#00838f", "#827717", "#7b1fa2", "#37474f", "#558b2f",
 		"#c62828", "#283593", "#00897b", "#5d4037", "#1976d2",
 	},
-	mode                  = "bg", -- "bg" or "fg"
-	max_columns           = 64,
-	patterns              = { "*.csv", "*.tsv" },
-	filetypes             = { "csv", "tsv" },
+	mode                    = "bg", -- "bg" or "fg"
+	max_columns             = 64,
+	patterns                = { "*.csv", "*.tsv" },
+	filetypes               = { "csv", "tsv" },
 
-	default_header_lines  = 1, -- sticky header ON by default
-	use_winbar_controls   = true, -- show [-] n [+] buttons in winbar
+	default_header_lines    = 1, -- sticky header ON by default
+	use_winbar_controls     = true, -- show [-] n [+] buttons in winbar
 
 	-- Clean-view settings
 	-- true: compute column widths from whole file; false: from visible region (faster for huge files)
-	clean_view_full_scan  = true,
+	clean_view_full_scan    = true,
 
 	-- Default keymap for clean-view toggle (gC). Set to false to disable.
-	keymap                = true,
+	keymap                  = true,
 
 	-- autodetection of separator
-	auto_detect_separator = true, -- ON by default
-	detect_candidates     = { "\t", ",", ";", "|" },
-	detect_max_lines      = 200, -- read at most this many lines
-	detect_nonempty_limit = 10, -- stop after this many non-empty lines
+	auto_detect_separator   = true, -- ON by default
+	detect_candidates       = { "\t", ",", ";", "|" },
+	detect_max_lines        = 200, -- read at most this many lines
+	detect_nonempty_limit   = 10, -- stop after this many non-empty lines
+
+	-- autodetection for arbitrary buffers (if this plugin should turn itself on)
+	auto_enable_any_buffer  = true, -- ON by default
+	auto_enable_agree_level = 0.7, -- % of sampled non-empty lines that must have >= N columns
+
+	-- auto-enable clean-view mode
+	auto_enable_clean_view  = false, -- OFF by default
 }
 
 -- per-buffer state (weak keys)
@@ -151,6 +158,13 @@ local function ensure_overlay(win, height, col_off, width)
 	return overlays[win]
 end
 
+local function ensure_default_clean_view(buf)
+	local st = bufstate(buf)
+	if st.clean_active == nil then
+		st.clean_active = true -- default ON; user can toggle later
+	end
+end
+
 -- Enable/restore horizontal panning so cursor can move beyond EOL in clean-view.
 local function apply_clean_scroll_opts(win, enable)
 	local buf = vim.api.nvim_win_get_buf(win)
@@ -233,12 +247,25 @@ end
 
 -- helpers
 local function is_csv_buf(buf)
+	-- fast-path: explicit filetype or extension
 	local ft = vim.bo[buf].filetype
-	for _, f in ipairs(M.config.filetypes) do
-		if ft == f then return true end
+	if ft == "csv" or ft == "tsv" then return true end
+	local name = (vim.api.nvim_buf_get_name(buf) or ""):lower()
+	if name:match("%.csv$") or name:match("%.tsv$") then return true end
+
+	-- auto-enable for any buffer if enabled
+	if M.config.auto_enable_any_buffer then
+		local st = bufstate(buf)
+		if st.auto_csvcols ~= nil then
+			return st.auto_csvcols
+		end
+		local ok, sep = is_probably_delimited(buf)
+		st.auto_csvcols = ok
+		st.auto_sep = sep
+		return ok
 	end
-	local name = vim.api.nvim_buf_get_name(buf):lower()
-	return name:match("%.csv$") or name:match("%.tsv$")
+
+	return false
 end
 
 local function mouse_supports_clicks()
@@ -298,24 +325,24 @@ local function detect_sep(buf)
 	return best
 end
 
-
+-- determine the separator used in buf
 local function get_sep(buf)
-	-- autodetect of enabled
-	if M.config.auto_detect_separator then
-		local guess = detect_sep(buf)
-		if guess and #guess > 0 then
-			return guess
-		end
+	local st = bufstate(buf)
+	if st.auto_sep then
+		return st.auto_sep
 	end
 
-	-- fallback: filetype/extension
 	local ft = vim.bo[buf].filetype
 	if ft == "tsv" then return "\t" end
-
 	local name = (vim.api.nvim_buf_get_name(buf) or ""):lower()
 	if name:match("%.tsv$") then return "\t" end
 
-	-- default is the comma
+	-- Optional: content-sniff auto separator
+	if M.config.auto_detect_separator then
+		local guessed = detect_sep(buf)
+		if guessed then return guessed end
+	end
+
 	return ","
 end
 
@@ -384,9 +411,18 @@ local function render_header(win, buf, sep, top)
 		for col_idx, r in ipairs(ranges) do
 			local group = ("CsvCol%d"):format(((col_idx - 1) % #M.config.colors) + 1)
 			local start_col, end_col = r[1], r[2]
-			vim.api.nvim_buf_add_highlight(ov.buf, ns, group, i - 1, start_col, end_col)
+			vim.api.nvim_buf_set_extmark(ov.buf, ns, i - 1, start_col,
+				{ end_row = i - 1, end_col = (end_col == -1 and #(vim.api.nvim_buf_get_lines(ov.buf, i - 1, i, false)[1] or "") or end_col), hl_group =
+				group, hl_mode = "combine" })
 			if col_idx < #ranges and end_col ~= -1 then
-				vim.api.nvim_buf_add_highlight(ov.buf, ns, "CsvSep", i - 1, end_col, end_col + 1)
+				vim.api.nvim_buf_set_extmark(ov.buf, ns, i - 1, end_col,
+					{
+						end_row = i - 1,
+						end_col = end_col + 1,
+						hl_group = "CsvSep",
+						hl_mode =
+						"combine"
+					})
 			end
 		end
 	end
@@ -557,7 +593,14 @@ local function render_clean_view(win, buf, sep, top, bottom)
 			local start_x = (starts_per_line[i] and starts_per_line[i][col_idx]) or 0
 			local next_start = (starts_per_line[i] and starts_per_line[i][col_idx + 1])
 			local end_x = (next_start and next_start) or -1
-			vim.api.nvim_buf_add_highlight(ov.buf, ns, group, i - 1, start_x, end_x)
+			vim.api.nvim_buf_set_extmark(ov.buf, ns, i - 1, start_x,
+				{
+					end_row = i - 1,
+					end_col = (end_x == -1 and #(vim.api.nvim_buf_get_lines(ov.buf, i - 1, i, false)[1] or "") or end_x),
+					hl_group =
+					    group,
+					hl_mode = "combine"
+				})
 		end
 	end
 
@@ -618,7 +661,14 @@ function M.refresh(win)
 		for col_idx, r in ipairs(ranges) do
 			local group = ("CsvCol%d"):format(((col_idx - 1) % #M.config.colors) + 1)
 			local start_col, end_col = r[1], r[2]
-			vim.api.nvim_buf_add_highlight(buf, ns, group, top + i - 1, start_col, end_col)
+			vim.api.nvim_buf_set_extmark(buf, ns, top + i - 1, start_col,
+				{
+					end_row = top + i - 1,
+					end_col = (end_col == -1 and #(vim.api.nvim_buf_get_lines(buf, top + i - 1, top + i, false)[1] or "") or end_col),
+					hl_group =
+					    group,
+					hl_mode = "combine"
+				})
 		end
 	end
 
@@ -695,6 +745,37 @@ function M.setup(opts)
 		desc = "csvcols: cleanup overlays on window close",
 	})
 
+	-- On opening new buf, start detection if buf is csv/tsv and turn on plugin if enabled
+	-- (also turn on clean view mode when that is set)
+	vim.api.nvim_create_autocmd({ "BufEnter", "BufWinEnter" }, {
+		group = augroup,
+		pattern = "*",
+		callback = function(args)
+			local buf = args.buf
+			local st  = bufstate(buf)
+
+			-- (a) Prime autodiscovery cache if enabled
+			if M.config.auto_enable_any_buffer and st.auto_csvcols == nil then
+				local ok, sep = is_probably_delimited(buf)
+				st.auto_csvcols, st.auto_sep = ok, sep
+			end
+
+			-- (b) If this buffer is either supported (csv/tsv) OR autodiscovered,
+			--     and auto-clean is ON, default Clean View ON (once).
+			local ft = vim.bo[buf].filetype
+			local name = (vim.api.nvim_buf_get_name(buf) or ""):lower()
+			local supported = (ft == "csv" or ft == "tsv" or name:match("%.csv$") or name:match("%.tsv$"))
+			local looks_delimited = (st.auto_csvcols == true)
+
+			if M.config.auto_enable_clean_view and (supported or looks_delimited) then
+				ensure_default_clean_view(buf)
+				-- immediate render if we just turned it on
+				require("csvcols").refresh(0)
+			end
+		end,
+		desc = "csvcols: default Clean View via existing toggles",
+	})
+
 	-- Commands
 	vim.api.nvim_create_user_command("CsvHeader", function(cmd)
 		local buf = vim.api.nvim_get_current_buf()
@@ -768,6 +849,36 @@ function M.setup(opts)
 		end
 		M.refresh(0)
 	end, { nargs = 1, desc = "Enable/disable automatic delimiter detection" })
+
+	-- Autodection for any buf
+	vim.api.nvim_create_user_command("CsvAutoEnable", function(cmd)
+		local arg = (cmd.args or ""):lower()
+		if arg == "on" or arg == "1" or arg == "true" then
+			M.config.auto_enable_any_buffer = true
+		elseif arg == "off" or arg == "0" or arg == "false" then
+			M.config.auto_enable_any_buffer = false
+		else
+			vim.notify("[csvcols] usage: :CsvAutoEnable {on|off}", vim.log.levels.WARN); return
+		end
+		-- clear per-buffer cache so we re-evaluate
+		M._state = setmetatable({}, { __mode = "k" })
+		M.refresh(0)
+	end, { nargs = 1, desc = "Enable/disable auto CSV detection for any buffer" })
+
+	-- Enable clean view mode as default
+	vim.api.nvim_create_user_command("CsvAutoClean", function(cmd)
+		local arg = (cmd.args or ""):lower()
+		if arg == "on" or arg == "1" or arg == "true" then
+			M.config.auto_enable_clean_view = true
+		elseif arg == "off" or arg == "0" or arg == "false" then
+			M.config.auto_enable_clean_view = false
+		else
+			vim.notify("[csvcols] usage: :CsvAutoClean {on|off}", vim.log.levels.WARN); return
+		end
+		-- existing buffers already marked can flip their overlay on next refresh
+		M.refresh(0)
+	end, { nargs = 1, desc = "Enable/disable auto Clean View when auto-enabling" })
+
 
 	if M.config.keymap ~= false then
 		vim.keymap.set('n', 'gC', function() require('csvcols').toggle_clean_view() end,
