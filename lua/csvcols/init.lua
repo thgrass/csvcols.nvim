@@ -287,42 +287,38 @@ local function set_default_hl()
 	end
 end
 
+local function count_occ(line, delim)
+	local _, c = line:gsub(delim, "")
+	return c
+end
+
+-- Scan a small sample and pick the delimiter with the highest count.
 local function detect_sep(buf)
-	-- scan a few lines and count occurrences of candidate delimiters
 	local total = vim.api.nvim_buf_line_count(buf)
 	if total == 0 then return nil end
 
-	local max_lines  = math.min(M.config.detect_max_lines or 200, total)
-	local need_lines = M.config.detect_nonempty_limit or 10
-	local candidates = M.config.detect_candidates or { "\t", ",", ";", "|" }
+	local max_lines        = math.min((M.config.detect_max_lines or 200), total)
+	local need_lines       = (M.config.detect_nonempty_limit or 10)
+	local candidates       = (M.config.detect_candidates or { "\t", ",", ";", "|" })
 
-	-- initialize counts
-	local counts     = {}
+	local counts, nonempty = {}, 0
 	for _, d in ipairs(candidates) do counts[d] = 0 end
 
-	local nonempty = 0
-	local lines = vim.api.nvim_buf_get_lines(buf, 0, max_lines, false)
-	for _, line in ipairs(lines) do
+	for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, max_lines, false)) do
 		if line and line:match("%S") then
 			for _, d in ipairs(candidates) do
-				-- count occurrences of d in the line
-				local _, c = line:gsub(d, "")
-				counts[d] = counts[d] + c
+				counts[d] = counts[d] + count_occ(line, d)
 			end
 			nonempty = nonempty + 1
 			if nonempty >= need_lines then break end
 		end
 	end
 
-	-- pick the delimiter with the highest count
 	local best, bestc = nil, -1
 	for d, c in pairs(counts) do
 		if c > bestc then best, bestc = d, c end
 	end
-
-	-- if nothing stood out, return nil so caller can fallback
-	if not best or bestc <= 0 then return nil end
-	return best
+	return (bestc and bestc > 0) and best or nil
 end
 
 -- determine the separator used in buf
@@ -344,6 +340,40 @@ local function get_sep(buf)
 	end
 
 	return ","
+end
+
+-- Heuristic: consider a buffer "probably delimited" if a good fraction of sampled
+-- non-empty lines have at least N fields with the best delimiter.
+function is_probably_delimited(buf)
+	local sep = detect_sep(buf)
+	if not sep then return false, nil end
+
+	local total = vim.api.nvim_buf_line_count(buf)
+	if total == 0 then return false, nil end
+
+	local lines           = vim.api.nvim_buf_get_lines(
+		buf, 0, math.min((M.config.auto_enable_probe_lines or 200), total), false
+	)
+
+	local need_cols       = (M.config.auto_enable_min_columns or 2)
+	local agree_ratio     = (M.config.auto_enable_min_agree or 0.7)
+	local limit_nonempty  = (M.config.auto_enable_nonempty or 20)
+
+	local nonempty, agree = 0, 0
+	for _, line in ipairs(lines) do
+		if line and line:match("%S") then
+			nonempty = nonempty + 1
+			local fields = 1
+			local dc = count_occ(line, sep)
+			if dc > 0 then fields = dc + 1 end
+			if fields >= need_cols then agree = agree + 1 end
+			if nonempty >= limit_nonempty then break end
+		end
+	end
+
+	if nonempty == 0 then return false, nil end
+	local ratio = agree / nonempty
+	return (ratio >= agree_ratio), sep
 end
 
 -- Return { {start_col, end_col} ... } for fields on a line.
@@ -412,8 +442,13 @@ local function render_header(win, buf, sep, top)
 			local group = ("CsvCol%d"):format(((col_idx - 1) % #M.config.colors) + 1)
 			local start_col, end_col = r[1], r[2]
 			vim.api.nvim_buf_set_extmark(ov.buf, ns, i - 1, start_col,
-				{ end_row = i - 1, end_col = (end_col == -1 and #(vim.api.nvim_buf_get_lines(ov.buf, i - 1, i, false)[1] or "") or end_col), hl_group =
-				group, hl_mode = "combine" })
+				{
+					end_row = i - 1,
+					end_col = (end_col == -1 and #(vim.api.nvim_buf_get_lines(ov.buf, i - 1, i, false)[1] or "") or end_col),
+					hl_group =
+					    group,
+					hl_mode = "combine"
+				})
 			if col_idx < #ranges and end_col ~= -1 then
 				vim.api.nvim_buf_set_extmark(ov.buf, ns, i - 1, end_col,
 					{
