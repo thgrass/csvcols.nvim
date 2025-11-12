@@ -433,31 +433,60 @@ local function render_header(win, buf, sep, top)
 	local ov           = ensure_overlay(win, upto, col_off, text_w)
 
 	vim.api.nvim_buf_set_option(ov.buf, "modifiable", true)
-	vim.api.nvim_buf_set_lines(ov.buf, 0, -1, false, header_lines)
 	vim.api.nvim_buf_clear_namespace(ov.buf, ns, 0, -1)
 
-	for i, line in ipairs(header_lines) do
-		local ranges = field_ranges(line, sep, M.config.max_columns)
-		for col_idx, r in ipairs(ranges) do
-			local group = ("CsvCol%d"):format(((col_idx - 1) % #M.config.colors) + 1)
-			local start_col, end_col = r[1], r[2]
-			vim.api.nvim_buf_set_extmark(ov.buf, ns, i - 1, start_col,
-				{
-					end_row = i - 1,
-					end_col = (end_col == -1 and #(vim.api.nvim_buf_get_lines(ov.buf, i - 1, i, false)[1] or "") or end_col),
-					hl_group =
-					    group,
-					hl_mode = "combine"
+	local st = bufstate(buf)
+	if st.clean_active then
+		-- Use same widths as clean-view for padded header
+		if not st.clean_widths or st.clean_widths_tick ~= vim.api.nvim_buf_get_changedtick(buf) then
+			st.clean_widths = compute_column_widths_for(buf, sep, top, vim.fn.line("w$"), true)
+			st.clean_widths_tick = vim.api.nvim_buf_get_changedtick(buf)
+		end
+
+		local padded, starts_per_line = build_padded_lines(header_lines, sep, st.clean_widths or {})
+		vim.api.nvim_buf_set_lines(ov.buf, 0, -1, false, padded)
+
+		-- Colorize by column using padded starts
+		for i, raw in ipairs(header_lines) do
+			local ranges = field_ranges(raw, sep, M.config.max_columns)
+			for col_idx, _ in ipairs(ranges) do
+				local group = ("CsvCol%d"):format(((col_idx - 1) % #M.config.colors) + 1)
+				local sx = (starts_per_line[i] and starts_per_line[i][col_idx]) or 0
+				local next_start = (starts_per_line[i] and starts_per_line[i][col_idx + 1])
+				local ex = (next_start and next_start) or -1 -- EOL
+
+				-- one-line extmark highlight (replacement for nvim_buf_add_highlight)
+				vim.api.nvim_buf_set_extmark(ov.buf, ns, i - 1, sx, {
+					end_row  = i - 1,
+					end_col  = (ex == -1 and #(padded[i] or "") or ex),
+					hl_group = group,
+					hl_mode  = "combine",
 				})
-			if col_idx < #ranges and end_col ~= -1 then
-				vim.api.nvim_buf_set_extmark(ov.buf, ns, i - 1, end_col,
-					{
-						end_row = i - 1,
-						end_col = end_col + 1,
+			end
+		end
+	else
+		-- Old behavior: raw header lines + direct ranges
+		vim.api.nvim_buf_set_lines(ov.buf, 0, -1, false, header_lines)
+		for i, line in ipairs(header_lines) do
+			local ranges = field_ranges(line, sep, M.config.max_columns)
+			for col_idx, r in ipairs(ranges) do
+				local group = ("CsvCol%d"):format(((col_idx - 1) % #M.config.colors) + 1)
+				local s, e = r[1], r[2]
+				vim.api.nvim_buf_set_extmark(ov.buf, ns, i - 1, s, {
+					end_row  = i - 1,
+					end_col  = (e == -1 and #line or e),
+					hl_group = group,
+					hl_mode  = "combine",
+				})
+				if col_idx < #ranges and e ~= -1 then
+					-- Separator single-char highlight
+					vim.api.nvim_buf_set_extmark(ov.buf, ns, i - 1, e, {
+						end_row  = i - 1,
+						end_col  = e + 1,
 						hl_group = "CsvSep",
-						hl_mode =
-						"combine"
+						hl_mode  = "combine",
 					})
+				end
 			end
 		end
 	end
