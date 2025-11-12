@@ -11,7 +11,7 @@ Colorize **CSV/TSV** files by giving each **column** a distinct highlight color.
 - Zero‑config optional auto‑setup (via `plugin/csvcols.lua`), or explicit `setup()`
 - Sticky headers configurable via commands or (optional) GUI buttons.
 - Autodetection of separator character (can be turned off)
-- "Clean View" mode renders CSV/TSV as padded, spreadsheet-like table in a synced overlay.
+- "Clean View" mode renders CSV/TSV as padded, spreadsheet-like table in a synced overlay. Toggle via commands or GUI button.
 
 ## Requirements
 - Neovim 0.8+ (LuaJIT)

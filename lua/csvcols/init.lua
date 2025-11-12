@@ -712,72 +712,88 @@ end
 
 -- Render / update the clean-view overlay for the current window.
 local function render_clean_view(win, buf, sep, top, bottom)
-	local info        = vim.fn.getwininfo(win)[1]
-	local col_off     = (info and info.textoff) or 0
-	local text_w      = math.max(1, ((info and info.width) or vim.api.nvim_win_get_width(win)) - col_off)
-	local text_h      = math.max(1, vim.api.nvim_win_get_height(win))
+	-- window geometry + horizontal scroll
+	local col_off, text_w = win_text_area(win)
+	local left            = win_leftcol(win)
+	local text_h          = math.max(1, vim.api.nvim_win_get_height(win))
 
-	local st          = bufstate(buf)
-	st.clean_active   = true
+	local st              = bufstate(buf)
+	st.clean_active       = true
 
-	-- Widths: either whole file (cached per changedtick) or visible region each time
-	local full        = M.config.clean_view_full_scan
-	local changedtick = vim.api.nvim_buf_get_changedtick(buf)
+	-- widths: whole file (cached) or region
+	local full            = M.config.clean_view_full_scan
+	local changedtick     = vim.api.nvim_buf_get_changedtick(buf)
 	if full then
 		if not st.clean_widths or st.clean_widths_tick ~= changedtick then
-			st.clean_widths = compute_column_widths_for(buf, sep, top, bottom, true)
+			st.clean_widths      = compute_column_widths_for(buf, sep, top, bottom, true)
 			st.clean_widths_tick = changedtick
 		end
 	else
-		st.clean_widths = compute_column_widths_for(buf, sep, top, bottom, false)
+		st.clean_widths      = compute_column_widths_for(buf, sep, top, bottom, false)
 		st.clean_widths_tick = changedtick
 	end
 	local widths = st.clean_widths or {}
 
-	-- Visible lines -> padded copy
-	local lines = vim.api.nvim_buf_get_lines(buf, top, bottom, false)
-	local padded, starts_per_line = build_padded_lines(lines, sep, widths)
+	-- visible source lines
+	local src_lines = vim.api.nvim_buf_get_lines(buf, top, bottom, false)
 
-	-- Open/resize overlay
+	-- build padded lines + per-column starts in padded space
+	local padded, starts_per_line = build_padded_lines(src_lines, sep, widths)
+
+	-- ensure/resize clean overlay to text area
 	local ov = ensure_clean_overlay(win, text_h, col_off, text_w)
 
-	-- Fill and colorize
+	-- slice padded lines to visible region [left, left+text_w)
+	local sliced, slice_offsets = {}, {}
+	for i, pl in ipairs(padded) do
+		local s_txt, s_off = slice_display(pl, left, text_w)
+		sliced[i]          = s_txt
+		slice_offsets[i]   = s_off
+	end
+
+	-- fill buffer and colorize
 	vim.api.nvim_set_option_value("modifiable", true, { buf = ov.buf })
-	vim.api.nvim_buf_set_lines(ov.buf, 0, -1, false, padded)
+	vim.api.nvim_buf_set_lines(ov.buf, 0, -1, false, sliced)
 	vim.api.nvim_buf_clear_namespace(ov.buf, ns, 0, -1)
 
-	for i, line in ipairs(lines) do
-		local ranges = field_ranges(line, sep, M.config.max_columns)
-		for col_idx, r in ipairs(ranges) do
-			local group = ("CsvCol%d"):format(((col_idx - 1) % #M.config.colors) + 1)
-			local start_x = (starts_per_line[i] and starts_per_line[i][col_idx]) or 0
-			local next_start = (starts_per_line[i] and starts_per_line[i][col_idx + 1])
-			local end_x = (next_start and next_start) or -1
-			vim.api.nvim_buf_set_extmark(ov.buf, ns, i - 1, start_x,
-				{
-					end_row = i - 1,
-					end_col = (end_x == -1 and #(vim.api.nvim_buf_get_lines(ov.buf, i - 1, i, false)[1] or "") or end_x),
+	for i = 1, #src_lines do
+		local starts = starts_per_line[i] or {}
+		local s_off  = slice_offsets[i] or 0
+		local vis    = sliced[i] or ""
 
-					hl_group =
-					    group,
+		for col_idx = 1, #starts do
+			local group      = ("CsvCol%d"):format(((col_idx - 1) % #M.config.colors) + 1)
+			local sx         = (starts[col_idx] or 0) - s_off
+			local next_start = starts[col_idx + 1]
+			local ex         = (next_start and (next_start - s_off)) or -1
 
-					hl_mode = "combine"
-				})
+			if ex == -1 then
+				if sx < #vis then
+					add_hl_line(ov.buf, ns, group, i - 1, math.max(0, sx), -1)
+				end
+			else
+				if ex > 0 and sx < #vis then
+					add_hl_line(ov.buf, ns, group, i - 1, math.max(0, sx), math.max(0, ex))
+				end
+			end
 		end
 	end
 
 	vim.api.nvim_set_option_value("modifiable", false, { buf = ov.buf })
 
-	-- Mirror cursor into clean view (start of the current cell)
-	local cur = vim.api.nvim_win_get_cursor(win) -- {line1, col0}
+	-- Mirror cursor: jump to start of current cell in sliced padded space
+	local cur = vim.api.nvim_win_get_cursor(win) -- {row1, col0}
 	local cur_row0 = cur[1] - 1
 	local cur_col0 = cur[2]
 	if cur_row0 >= top and cur_row0 < bottom then
-		local line = vim.api.nvim_buf_get_lines(buf, cur_row0, cur_row0 + 1, false)[1] or ""
+		local line    = vim.api.nvim_buf_get_lines(buf, cur_row0, cur_row0 + 1, false)[1] or ""
 		local col_idx = cursor_col_index(line, sep, M.config.max_columns, cur_col0)
-		local rel = cur_row0 - top
-		local sx = (starts_per_line[rel + 1] and starts_per_line[rel + 1][col_idx]) or 0
-		pcall(vim.api.nvim_win_set_cursor, ov.win, { rel + 1, sx })
+		local rel     = cur_row0 - top
+		local sx      = (starts_per_line[rel + 1] and starts_per_line[rel + 1][col_idx]) or 0
+		-- shift by slice offset so the cursor lands inside the visible slice
+		local off     = slice_offsets[rel + 1] or 0
+		local sx_vis  = math.max(0, sx - off)
+		pcall(vim.api.nvim_win_set_cursor, ov.win, { rel + 1, sx_vis })
 	end
 end
 
