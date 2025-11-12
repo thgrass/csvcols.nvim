@@ -70,10 +70,13 @@ autocmd FileType csv,tsv lua require('csvcols').setup()
 - **Edit Settings**: Edit the code in `plugin/csvcols.lua` or provide your own call to `setup()` elsewhere. See "Configuration" right below.
 
 Commands:
-- `:CsvColsRefresh` — force re-colorizing the visible range
-- `:CsvColsClear` — clear all column highlights in current buffer
+- `:CsvColsRefresh` - force re-colorizing the visible range
+- `:CsvColsClear` - clear all column highlights in current buffer
 - `gC` / `:CsvCleanToggle` - toggle tabular "clean view" mode
 - `:CsvAutoSepToggle` / `:CsvAutoSep {on|off}` - toggle/set separator autodetection
+- `:CsvAutoClean` / `:CsvAutoEnable` - toggle/set autodetection on any buffer
+- `:CsvHeader` / `:CsvHeaderToggle`  - set/toggle sticky header
+- `:CsvHeaderInc` / `:CsvHeaderDec`  - increase/decrease number of lines in sticky header
 
 ---
 
@@ -88,19 +91,20 @@ require('csvcols').setup({
     "#00838f", "#827717", "#7b1fa2", "#37474f", "#558b2f",
     "#c62828", "#283593", "#00897b", "#5d4037", "#1976d2",
   },
-  mode = "bg",          -- "bg" or "fg"
-  max_columns = 64,      -- soft cap for work on ultra-wide files
+  mode = "bg",                  -- "bg" or "fg" for background or foreground coloring
+  max_columns = 64,             -- Soft cap for extremely wide files
   patterns = { "*.csv", "*.tsv" },
-  filetypes = { "csv", "tsv" }, -- if you have ftplugins setting these
-  default_header_lines = 1,  -- How many lines to pin by default (0 disables)
-  use_winbar_controls = true, -- Show clickable [-]/[+] buttons in winbar that change lines in sticky headers
-  keymap =  true,  -- Provide a shortcut keymap `gc` for toggling clean view mode
-  auto_detect_separator = true,  -- Autodetection of separator character
-  detect_candidates     = { "\t", ",", ";", "|" },  -- List of separators that are considered in autodetection
+  filetypes = { "csv", "tsv" },
+  default_header_lines = 1,     -- How many lines to pin as sticky header
+  use_winbar_controls = true,   -- Add clickable [+]/[-] controls for header lines
+  keymap = true,                -- Enable `gC` shortcut for clean view toggle
+  auto_detect_separator = true, -- Enable separator autodetection
+  detect_candidates = { "\t", ",", ";", "|" }, -- Supported delimiters in detector separation
+  clean_view_by_default = false, -- start in clean view mode?
 })
-
-vim.opt.mouse = "a"    -- enable mouse, should be enabled per default
 ```
+
+**Tip:** The plugin works for any buffer if you manually toggle :CsvCleanToggle or :CsvAutoSepToggle, even for files not ending in .csv or .tsv. Or set `cleam_view_by_default = true`.
 
 ---
 

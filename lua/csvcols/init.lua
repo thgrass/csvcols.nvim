@@ -556,31 +556,31 @@ local function render_header(win, buf, sep, top)
 		return
 	end
 	-- Source header lines
-	local upto = math.min(n, total)
-	local header_lines = vim.api.nvim_buf_get_lines(buf, 0, upto, false)
+	local upto            = math.min(n, total)
+	local header_lines    = vim.api.nvim_buf_get_lines(buf, 0, upto, false)
 	-- Window geometry and horizontal scroll
 	local col_off, text_w = win_text_area(win)
-	local left = win_leftcol(win)
+	local left            = win_leftcol(win)
 	-- Ensure/resize overlay
-	local ov = ensure_overlay(win, upto, col_off, text_w)
+	local ov              = ensure_overlay(win, upto, col_off, text_w)
 	vim.api.nvim_set_option_value("modifiable", true, { buf = ov.buf })
 	vim.api.nvim_buf_clear_namespace(ov.buf, ns, 0, -1)
 	local st = bufstate(buf)
 	if st.clean_active then
 		-- Clean view: compute widths (whole file) if changed
 		if not st.clean_widths or st.clean_widths_tick ~= vim.api.nvim_buf_get_changedtick(buf) then
-			st.clean_widths = compute_column_widths_for(buf, sep, top, vim.fn.line("w$"), true)
+			st.clean_widths      = compute_column_widths_for(buf, sep, top, vim.fn.line("w$"), true)
 			st.clean_widths_tick = vim.api.nvim_buf_get_changedtick(buf)
 		end
 		-- Build padded header lines and per-column starts
 		local padded, starts_per_line = build_padded_lines(header_lines, sep, st.clean_widths or {})
 		-- Slice each padded header line to visible region
-		local sliced = {}
-		local slice_offsets = {}
+		local sliced                  = {}
+		local slice_offsets           = {}
 		for i, pl in ipairs(padded) do
 			local s_txt, s_off = slice_display(pl, left, text_w)
-			sliced[i] = s_txt
-			slice_offsets[i] = s_off
+			sliced[i]          = s_txt
+			slice_offsets[i]   = s_off
 		end
 		vim.api.nvim_buf_set_lines(ov.buf, 0, -1, false, sliced)
 		-- Colorize by column using padded starts and slice offsets
@@ -606,12 +606,12 @@ local function render_header(win, buf, sep, top)
 		end
 	else
 		-- Normal view: slice raw header lines and highlight ranges within slice
-		local sliced = {}
+		local sliced        = {}
 		local slice_offsets = {}
 		for i, raw in ipairs(header_lines) do
 			local s_txt, s_off = slice_display(raw, left, text_w)
-			sliced[i] = s_txt
-			slice_offsets[i] = s_off
+			sliced[i]          = s_txt
+			slice_offsets[i]   = s_off
 		end
 		vim.api.nvim_buf_set_lines(ov.buf, 0, -1, false, sliced)
 		for i, raw in ipairs(header_lines) do
