@@ -10,11 +10,8 @@ Colorize **CSV/TSV** files by giving each **column** a distinct highlight color.
 - Efficient: re-highlights only visible lines on `WinScrolled`, `CursorMoved`, edits, etc.
 - Zero‑config optional auto‑setup (via `plugin/csvcols.lua`), or explicit `setup()`
 - Sticky headers configurable via commands or (optional) GUI buttons.
-<<<<<<< HEAD
 - Autodetection of separator character (can be turned off)
-=======
 - "Clean View" mode renders CSV/TSV as padded, spreadsheet-like table in a synced overlay.
->>>>>>> 8a0eba72b97fb72217033a00766496d341373d85
 
 ## Requirements
 - Neovim 0.8+ (LuaJIT)
@@ -82,6 +79,7 @@ Commands:
 
 ## Configuration
 Default configuration (you can override any key in `setup({ ... })`):
+For example:
 
 ```lua
 require('csvcols').setup({
@@ -94,22 +92,15 @@ require('csvcols').setup({
   max_columns = 64,      -- soft cap for work on ultra-wide files
   patterns = { "*.csv", "*.tsv" },
   filetypes = { "csv", "tsv" }, -- if you have ftplugins setting these
-<<<<<<< HEAD
   default_header_lines = 1,  -- How many lines to pin by default (0 disables)
   use_winbar_controls = true, -- Show clickable [-]/[+] buttons in winbar that change lines in sticky headers
+  keymap =  true,  -- Provide a shortcut keymap `gc` for toggling clean view mode
   auto_detect_separator = true,  -- Autodetection of separator character
-=======
-  default_header_lines = 1,  -- How many lines to pin by default (0 disables by default)
-  use_winbar_controls = true, -- Show clickable [-]/[+] buttons in winbar that change lines in sticky header
-  clean_view_full_scan = true, -- Compute column widths from the entire buffer (true) or only the visible window (false). Set to false for very large files to keep updates snappy.
-  keymap = true, -- Provide a default keymap `gC` to toggle clean view. 
->>>>>>> 8a0eba72b97fb72217033a00766496d341373d85
+  detect_candidates     = { "\t", ",", ";", "|" },  -- List of separators that are considered in autodetection
 })
 
 vim.opt.mouse = "a"    -- enable mouse, should be enabled per default
 ```
-
-
 
 ---
 
@@ -128,4 +119,4 @@ csvcols.nvim/
 ---
 
 ## License
-MIT © thgrass
+MIT © T. Grassmann
