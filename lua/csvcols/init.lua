@@ -43,6 +43,7 @@ M.config           = {
 
 	-- autodetection for arbitrary buffers (if this plugin should turn itself on)
 	auto_enable_any_buffer  = true, -- ON by default
+	auto_enable_num_columns = 3, -- N
 	auto_enable_agree_level = 0.7, -- % of sampled non-empty lines that must have >= N columns
 
 	-- auto-enable clean-view mode
@@ -306,46 +307,6 @@ local function add_hl_line(buf, ns_id, hl_group, row, s_byte, e_byte)
 end
 
 -- helpers
-local function is_csv_buf(buf)
-	-- fast-path: explicit filetype or extension
-	local ft = vim.bo[buf].filetype
-	if ft == "csv" or ft == "tsv" then return true end
-	local name = (vim.api.nvim_buf_get_name(buf) or ""):lower()
-	if name:match("%.csv$") or name:match("%.tsv$") then return true end
-
-	-- auto-enable for any buffer if enabled
-	if M.config.auto_enable_any_buffer then
-		local st = bufstate(buf)
-		if st.auto_csvcols ~= nil then
-			return st.auto_csvcols
-		end
-		local ok, sep = is_probably_delimited(buf)
-		st.auto_csvcols = ok
-		st.auto_sep = sep
-		return ok
-	end
-
-	return false
-end
-
-local function mouse_supports_clicks()
-	local m = vim.o.mouse or ""
-	return m:find("a", 1, true) or m:find("n", 1, true) or m:find("v", 1, true)
-end
-
-local function set_default_hl()
-	for i, color in ipairs(M.config.colors) do
-		local def = (M.config.mode == "bg") and { bg = color } or { fg = color }
-		def.bold = false
-		vim.api.nvim_set_hl(0, ("CsvCol%d"):format(i), def)
-	end
-	if vim.fn.hlexists("CsvSep") == 0 then
-		vim.api.nvim_set_hl(0, "CsvSep", { link = "Comment" })
-	end
-	if vim.fn.hlexists("CsvHeaderText") == 0 then
-		vim.api.nvim_set_hl(0, "CsvHeaderText", { bold = true })
-	end
-end
 
 local function count_occ(line, delim)
 	local _, c = line:gsub(delim, "")
@@ -381,30 +342,45 @@ local function detect_sep(buf)
 	return (bestc and bestc > 0) and best or nil
 end
 
--- determine the separator used in buf
-local function get_sep(buf)
-	local st = bufstate(buf)
-	if st.auto_sep then
-		return st.auto_sep
+--- Check if a buffer should auto-enable based on column count
+function M.should_auto_enable(bufnr)
+	if not M.config.auto_enable_any_buffer then
+		return false
 	end
 
-	local ft = vim.bo[buf].filetype
-	if ft == "tsv" then return "\t" end
-	local name = (vim.api.nvim_buf_get_name(buf) or ""):lower()
-	if name:match("%.tsv$") then return "\t" end
+	bufnr           = bufnr or vim.api.nvim_get_current_buf()
 
-	-- Optional: content-sniff auto separator
-	if M.config.auto_detect_separator then
-		local guessed = detect_sep(buf)
-		if guessed then return guessed end
+	-- Get all lines in the buffer
+	local lines     = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+
+	local non_empty = 0
+	local agree     = 0
+
+	for _, line in ipairs(lines) do
+		-- Trim whitespace
+		local trimmed = line:match("^%s*(.-)%s*$")
+		if trimmed ~= "" then
+			non_empty = non_empty + 1
+
+			-- Split by whitespace into "columns"
+			local cols = vim.split(trimmed, "%s+", { trimempty = true })
+			if #cols >= M.config.auto_enable_num_columns then
+				agree = agree + 1
+			end
+		end
 	end
 
-	return ","
+	if non_empty == 0 then
+		return false
+	end
+
+	local fraction = agree / non_empty
+	return fraction >= M.config.auto_enable_agree_level
 end
 
 -- Heuristic: consider a buffer "probably delimited" if a good fraction of sampled
 -- non-empty lines have at least N fields with the best delimiter.
-function is_probably_delimited(buf)
+local function is_probably_delimited(buf)
 	local sep = detect_sep(buf)
 	if not sep then return false, nil end
 
@@ -434,6 +410,70 @@ function is_probably_delimited(buf)
 	if nonempty == 0 then return false, nil end
 	local ratio = agree / nonempty
 	return (ratio >= agree_ratio), sep
+end
+
+local function is_csv_buf(buf)
+	-- fast-path: explicit filetype or extension
+	local ft = vim.bo[buf].filetype
+	if ft == "csv" or ft == "tsv" then return true end
+	local name = (vim.api.nvim_buf_get_name(buf) or ""):lower()
+	if name:match("%.csv$") or name:match("%.tsv$") then return true end
+
+	-- auto-enable for any buffer if enabled
+	if M.should_auto_enable(buf) then
+		local st = bufstate(buf)
+		if st.auto_csvcols ~= nil then
+			return st.auto_csvcols
+		end
+		local ok, sep = is_probably_delimited(buf)
+		st.auto_csvcols = ok
+		st.auto_sep = sep
+		return ok
+	end
+
+	return false
+end
+
+local function mouse_supports_clicks()
+	local m = vim.o.mouse or ""
+	return m:find("a", 1, true) or m:find("n", 1, true) or m:find("v", 1, true)
+end
+
+local function set_default_hl()
+	for i, color in ipairs(M.config.colors) do
+		local def = (M.config.mode == "bg") and { bg = color } or { fg = color }
+		def.bold = false
+		vim.api.nvim_set_hl(0, ("CsvCol%d"):format(i), def)
+	end
+	if vim.fn.hlexists("CsvSep") == 0 then
+		vim.api.nvim_set_hl(0, "CsvSep", { link = "Comment" })
+	end
+	if vim.fn.hlexists("CsvHeaderText") == 0 then
+		vim.api.nvim_set_hl(0, "CsvHeaderText", { bold = true })
+	end
+end
+
+
+
+-- determine the separator used in buf
+local function get_sep(buf)
+	local st = bufstate(buf)
+	if st.auto_sep then
+		return st.auto_sep
+	end
+
+	local ft = vim.bo[buf].filetype
+	if ft == "tsv" then return "\t" end
+	local name = (vim.api.nvim_buf_get_name(buf) or ""):lower()
+	if name:match("%.tsv$") then return "\t" end
+
+	-- Optional: content-sniff auto separator
+	if M.config.auto_detect_separator then
+		local guessed = detect_sep(buf)
+		if guessed then return guessed end
+	end
+
+	return ","
 end
 
 -- Return { {start_col, end_col} ... } for fields on a line.
