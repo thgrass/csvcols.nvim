@@ -176,22 +176,178 @@ local function apply_clean_scroll_opts(win, enable)
 	if enable then
 		if not st._saved_scroll then
 			st._saved_scroll = {
-				wrap        = vim.api.nvim_get_option_value("wrap", { win = win }),
-				virtualedit = vim.api.nvim_get_option_value("virtualedit", { win = win }),
+				wrap = vim.api.nvim_get_option_value("wrap", { win = win }),
 			}
 		end
 
 		-- these are per-window, safe to tweak
 		pcall(vim.api.nvim_set_option_value, "wrap", false, { win = win })
-		pcall(vim.api.nvim_set_option_value, "virtualedit", "all", { win = win })
 	else
 		local sv = st._saved_scroll
 		if sv then
 			pcall(vim.api.nvim_set_option_value, "wrap", sv.wrap, { win = win })
-			pcall(vim.api.nvim_set_option_value, "virtualedit", sv.virtualedit, { win = win })
 			st._saved_scroll = nil
 		end
 	end
+end
+
+-- helpers clean view
+-- count nr of delimiters in a line
+local function count_occ(line, delim)
+	local _, c = line:gsub(delim, "")
+	return c
+end
+
+-- Scan a small sample and pick the delimiter with the highest count.
+local function detect_sep(buf)
+	local total = vim.api.nvim_buf_line_count(buf)
+	if total == 0 then return nil end
+
+	local max_lines        = math.min((M.config.detect_max_lines or 200), total)
+	local need_lines       = (M.config.detect_nonempty_limit or 10)
+	local candidates       = (M.config.detect_candidates or { "\t", ",", ";", "|" })
+
+	local counts, nonempty = {}, 0
+	for _, d in ipairs(candidates) do counts[d] = 0 end
+
+	for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, max_lines, false)) do
+		if line and line:match("%S") then
+			for _, d in ipairs(candidates) do
+				counts[d] = counts[d] + count_occ(line, d)
+			end
+			nonempty = nonempty + 1
+			if nonempty >= need_lines then break end
+		end
+	end
+
+	local best, bestc = nil, -1
+	for d, c in pairs(counts) do
+		if c > bestc then best, bestc = d, c end
+	end
+	return (bestc and bestc > 0) and best or nil
+end
+
+-- Helpers for horizontal scrolling and slicing lines by display width.
+-- Return the text offset (excluded columns) and the text area width for window 'win'.
+local function win_text_area(win)
+	local info    = vim.fn.getwininfo(win)[1]
+	local col_off = (info and info.textoff) or 0
+	local text_w  = math.max(1, ((info and info.width) or vim.api.nvim_win_get_width(win)) - col_off)
+	return col_off, text_w
+end
+
+-- Return the leftmost display column of window 'win' (horizontal scroll).
+local function win_leftcol(win)
+	local v = vim.fn.winsaveview()
+	return (v and v.leftcol) or 0
+end
+
+-- Heuristic: consider a buffer "probably delimited" if a good fraction of sampled
+-- non-empty lines have at least N fields with the best delimiter.
+local function is_probably_delimited(buf)
+	local sep = detect_sep(buf)
+	if not sep then return false, nil end
+
+	local total = vim.api.nvim_buf_line_count(buf)
+	if total == 0 then return false, nil end
+
+	local lines           = vim.api.nvim_buf_get_lines(
+		buf, 0, math.min((M.config.auto_enable_probe_lines or 200), total), false
+	)
+
+	local need_cols       = (M.config.auto_enable_min_columns or 2)
+	local agree_ratio     = (M.config.auto_enable_min_agree or 0.7)
+	local limit_nonempty  = (M.config.auto_enable_nonempty or 20)
+
+	local nonempty, agree = 0, 0
+	for _, line in ipairs(lines) do
+		if line and line:match("%S") then
+			nonempty = nonempty + 1
+			local fields = 1
+			local dc = count_occ(line, sep)
+			if dc > 0 then fields = dc + 1 end
+			if fields >= need_cols then agree = agree + 1 end
+			if nonempty >= limit_nonempty then break end
+		end
+	end
+
+	if nonempty == 0 then return false, nil end
+	local ratio = agree / nonempty
+	return (ratio >= agree_ratio), sep
+end
+local function is_csv_buf(buf)
+	-- fast-path: explicit filetype or extension
+	local ft = vim.bo[buf].filetype
+	if ft == "csv" or ft == "tsv" then return true end
+	local name = (vim.api.nvim_buf_get_name(buf) or ""):lower()
+	if name:match("%.csv$") or name:match("%.tsv$") then return true end
+
+	-- auto-enable for any buffer if enabled
+	if M.should_auto_enable(buf) then
+		local st = bufstate(buf)
+		if st.auto_csvcols ~= nil then
+			return st.auto_csvcols
+		end
+		local ok, sep = is_probably_delimited(buf)
+		st.auto_csvcols = ok
+		st.auto_sep = sep
+		return ok
+	end
+
+	return false
+end
+
+-- Jump horizontally to the padded end (rightmost column) in clean view.
+local function goto_clean_padded_end(win, buf)
+	local st = bufstate(buf)
+	if not (st and st.clean_active) then
+		-- fallback: normal "go to end of line"
+		vim.cmd("normal! $")
+		return
+	end
+
+	-- normal behaviour first: put cursor at real end of line
+	vim.cmd("normal! $")
+
+	-- use merged widths if available, else fallback to clean_widths
+	local widths = st.clean_widths_merged or st.clean_widths
+	if not widths or #widths == 0 then
+		return
+	end
+
+	-- compute approximate total padded width in display cells
+	local total_width = 0
+	for i, w in ipairs(widths) do
+		total_width = total_width + w
+		-- at least one cell between columns (separator / space)
+		if i < #widths then
+			total_width = total_width + 1
+		end
+	end
+
+	local _, text_w   = win_text_area(win)
+
+	local view        = vim.fn.winsaveview()
+	local target_left = math.max(0, total_width - text_w)
+	view.leftcol      = target_left
+	vim.fn.winrestview(view)
+end
+
+local function setup_clean_keymaps(buf)
+	local opts = { buffer = buf, noremap = true, silent = true }
+
+	vim.keymap.set("n", "<End>", function()
+		local win = vim.api.nvim_get_current_win()
+		local b   = vim.api.nvim_win_get_buf(win)
+
+		if not is_csv_buf(b) then
+			-- non-CSV buffers: default behaviour
+			vim.cmd("normal! $")
+			return
+		end
+
+		goto_clean_padded_end(win, b)
+	end, opts)
 end
 
 -- Ensure clean-view float exists over the text area
@@ -244,20 +400,7 @@ local function ensure_clean_overlay(win, height, col_off, width)
 	return clean_ov[win]
 end
 
--- Helpers for horizontal scrolling and slicing lines by display width.
--- Return the text offset (excluded columns) and the text area width for window 'win'.
-local function win_text_area(win)
-	local info    = vim.fn.getwininfo(win)[1]
-	local col_off = (info and info.textoff) or 0
-	local text_w  = math.max(1, ((info and info.width) or vim.api.nvim_win_get_width(win)) - col_off)
-	return col_off, text_w
-end
 
--- Return the leftmost display column of window 'win' (horizontal scroll).
-local function win_leftcol(win)
-	local v = vim.fn.winsaveview()
-	return (v and v.leftcol) or 0
-end
 
 -- Slice a line by display columns [leftcol, leftcol+width) and return the
 -- substring plus the byte offset into the original line.
@@ -304,41 +447,6 @@ local function add_hl_line(buf, ns_id, hl_group, row, s_byte, e_byte)
 	})
 end
 
--- helpers
--- count nr of delimiters in a line
-local function count_occ(line, delim)
-	local _, c = line:gsub(delim, "")
-	return c
-end
-
--- Scan a small sample and pick the delimiter with the highest count.
-local function detect_sep(buf)
-	local total = vim.api.nvim_buf_line_count(buf)
-	if total == 0 then return nil end
-
-	local max_lines        = math.min((M.config.detect_max_lines or 200), total)
-	local need_lines       = (M.config.detect_nonempty_limit or 10)
-	local candidates       = (M.config.detect_candidates or { "\t", ",", ";", "|" })
-
-	local counts, nonempty = {}, 0
-	for _, d in ipairs(candidates) do counts[d] = 0 end
-
-	for _, line in ipairs(vim.api.nvim_buf_get_lines(buf, 0, max_lines, false)) do
-		if line and line:match("%S") then
-			for _, d in ipairs(candidates) do
-				counts[d] = counts[d] + count_occ(line, d)
-			end
-			nonempty = nonempty + 1
-			if nonempty >= need_lines then break end
-		end
-	end
-
-	local best, bestc = nil, -1
-	for d, c in pairs(counts) do
-		if c > bestc then best, bestc = d, c end
-	end
-	return (bestc and bestc > 0) and best or nil
-end
 
 --- Check if a buffer should auto-enable based on column count
 function M.should_auto_enable(bufnr)
@@ -374,62 +482,6 @@ function M.should_auto_enable(bufnr)
 
 	local fraction = agree / non_empty
 	return fraction >= M.config.auto_enable_agree_level
-end
-
--- Heuristic: consider a buffer "probably delimited" if a good fraction of sampled
--- non-empty lines have at least N fields with the best delimiter.
-local function is_probably_delimited(buf)
-	local sep = detect_sep(buf)
-	if not sep then return false, nil end
-
-	local total = vim.api.nvim_buf_line_count(buf)
-	if total == 0 then return false, nil end
-
-	local lines           = vim.api.nvim_buf_get_lines(
-		buf, 0, math.min((M.config.auto_enable_probe_lines or 200), total), false
-	)
-
-	local need_cols       = (M.config.auto_enable_min_columns or 2)
-	local agree_ratio     = (M.config.auto_enable_min_agree or 0.7)
-	local limit_nonempty  = (M.config.auto_enable_nonempty or 20)
-
-	local nonempty, agree = 0, 0
-	for _, line in ipairs(lines) do
-		if line and line:match("%S") then
-			nonempty = nonempty + 1
-			local fields = 1
-			local dc = count_occ(line, sep)
-			if dc > 0 then fields = dc + 1 end
-			if fields >= need_cols then agree = agree + 1 end
-			if nonempty >= limit_nonempty then break end
-		end
-	end
-
-	if nonempty == 0 then return false, nil end
-	local ratio = agree / nonempty
-	return (ratio >= agree_ratio), sep
-end
-
-local function is_csv_buf(buf)
-	-- fast-path: explicit filetype or extension
-	local ft = vim.bo[buf].filetype
-	if ft == "csv" or ft == "tsv" then return true end
-	local name = (vim.api.nvim_buf_get_name(buf) or ""):lower()
-	if name:match("%.csv$") or name:match("%.tsv$") then return true end
-
-	-- auto-enable for any buffer if enabled
-	if M.should_auto_enable(buf) then
-		local st = bufstate(buf)
-		if st.auto_csvcols ~= nil then
-			return st.auto_csvcols
-		end
-		local ok, sep = is_probably_delimited(buf)
-		st.auto_csvcols = ok
-		st.auto_sep = sep
-		return ok
-	end
-
-	return false
 end
 
 local function mouse_supports_clicks()
@@ -987,6 +1039,7 @@ function M.toggle_clean_view()
 	st.clean_active = not st.clean_active
 	if st.clean_active then
 		apply_clean_scroll_opts(win, true)
+		setup_clean_keymaps(buf)
 	else
 		apply_clean_scroll_opts(win, false)
 		close_clean_overlay(win)
