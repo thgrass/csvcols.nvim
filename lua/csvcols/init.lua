@@ -170,27 +170,24 @@ end
 local function apply_clean_scroll_opts(win, enable)
 	local buf = vim.api.nvim_win_get_buf(win)
 	local st  = bufstate(buf)
+
+	-- set the scroll_opts
 	if enable then
 		if not st._saved_scroll then
 			st._saved_scroll = {
-				wrap          = vim.api.nvim_get_option_value("wrap", { win = win }),
-				virtualedit   = vim.api.nvim_get_option_value("virtualedit", { win = win }),
-				sidescroll    = vim.api.nvim_get_option_value("sidescroll", {}),
-				sidescrolloff = vim.api.nvim_get_option_value("sidescrolloff", {}),
+				wrap        = vim.api.nvim_get_option_value("wrap", { win = win }),
+				virtualedit = vim.api.nvim_get_option_value("virtualedit", { win = win }),
 			}
 		end
-		-- turn on true horizontal panning
+
+		-- these are per-window, safe to tweak
 		pcall(vim.api.nvim_set_option_value, "wrap", false, { win = win })
 		pcall(vim.api.nvim_set_option_value, "virtualedit", "all", { win = win })
-		pcall(vim.api.nvim_set_option_value, "sidescroll", 1, {})
-		pcall(vim.api.nvim_set_option_value, "sidescrolloff", 4, {})
 	else
 		local sv = st._saved_scroll
 		if sv then
 			pcall(vim.api.nvim_set_option_value, "wrap", sv.wrap, { win = win })
 			pcall(vim.api.nvim_set_option_value, "virtualedit", sv.virtualedit, { win = win })
-			pcall(vim.api.nvim_set_option_value, "sidescroll", sv.sidescroll, {})
-			pcall(vim.api.nvim_set_option_value, "sidescrolloff", sv.sidescrolloff, {})
 			st._saved_scroll = nil
 		end
 	end
@@ -697,20 +694,27 @@ function M._winbar_for(win)
 		return ""
 	end
 	local n = get_header_n(buf)
-	local left
+	local left, right
 	if mouse_supports_clicks() then
 		left = table.concat({
 			"%#Title#CSV hdr:%* ",
 			"%@v:lua.require'csvcols'._click_dec@[-]%X ",
 			"%#Title#", tostring(n), "%* ",
-			"%@v:lua.require'csvcols'._click_inc@[+ ]%X",
+			"%@v:lua.require'csvcols'._click_inc@[+]%X",
+
+		})
+		right = table.concat({
 			"%@v:lua.require'csvcols'._click_toggle_clean@[⯈]%X",
+			"%=%#Comment#  csvcols%"
 		})
 	else
 		left = table.concat({
 			"%#Title#CSV hdr:%* ",
 			"%#Title#", tostring(n), "%* ",
+		})
+		right = table.concat({
 			"[⯈]",
+			"%=%#Comment#  csvcols%*",
 		})
 	end
 	local right = "%=%#Comment#  csvcols%*"
@@ -782,6 +786,15 @@ local function render_clean_view(win, buf, sep, top, bottom)
 
 	-- ensure/resize clean overlay to text area
 	local ov = ensure_clean_overlay(win, text_h, col_off, text_w)
+
+	-- sync (horizontal) scrolling between source window and clean overlay
+	for _, w in ipairs({ win, ov.win }) do
+		-- required for horizontal scroll (zL/zH/zl/zh)
+		vim.api.nvim_set_option_value("wrap", false, { win = w })
+		vim.api.nvim_set_option_value("scrollbind", true, { win = w })
+	end
+	-- "hor,ver" for bidirectional sync; "hor" horizontal only
+	pcall(vim.api.nvim_set_option_value, "scrollopt", "hor", {})
 
 	-- slice padded lines to visible region [left, left+text_w)
 	local sliced, slice_offsets = {}, {}
@@ -871,7 +884,7 @@ function M.refresh(win)
 		return
 	end
 
-	-- recolor visible columns (original behavior)
+	-- recolor visible columns
 	vim.api.nvim_buf_clear_namespace(buf, ns, top, bottom)
 	local lines = vim.api.nvim_buf_get_lines(buf, top, bottom, false)
 	for i, line in ipairs(lines) do
