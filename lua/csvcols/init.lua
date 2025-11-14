@@ -21,7 +21,7 @@ M.config           = {
 		"#c62828", "#283593", "#00897b", "#5d4037", "#1976d2",
 	},
 	mode                    = "bg", -- "bg" or "fg"
-	max_columns             = 64,
+	max_columns             = 128,
 	patterns                = { "*.csv", "*.tsv" },
 	filetypes               = { "csv", "tsv" },
 
@@ -30,7 +30,7 @@ M.config           = {
 
 	-- Clean-view settings
 	-- true: compute column widths from whole file; false: from visible region (faster for huge files)
-	clean_view_full_scan    = true,
+	clean_view_full_scan    = false,
 
 	-- Default keymap for clean-view toggle (gC). Set to false to disable.
 	keymap                  = true,
@@ -108,6 +108,7 @@ local function ensure_overlay(win, height, col_off, width)
 			col = col_off,
 			width = width,
 			height = height,
+			focusable = false,
 			zindex = 50, -- header above clean-view
 		})
 		ov.height = height
@@ -304,7 +305,7 @@ local function add_hl_line(buf, ns_id, hl_group, row, s_byte, e_byte)
 end
 
 -- helpers
-
+-- count nr of delimiters in a line
 local function count_occ(line, delim)
 	local _, c = line:gsub(delim, "")
 	return c
@@ -695,30 +696,26 @@ function M._winbar_for(win)
 	end
 	local n = get_header_n(buf)
 	local left, right
+
 	if mouse_supports_clicks() then
 		left = table.concat({
 			"%#Title#CSV hdr:%* ",
 			"%@v:lua.require'csvcols'._click_dec@[-]%X ",
 			"%#Title#", tostring(n), "%* ",
 			"%@v:lua.require'csvcols'._click_inc@[+]%X",
-
 		})
 		right = table.concat({
 			"%@v:lua.require'csvcols'._click_toggle_clean@[⯈]%X",
-			"%=%#Comment#  csvcols%"
+			"%=%#Comment#  csvcols%*",
 		})
 	else
 		left = table.concat({
 			"%#Title#CSV hdr:%* ",
 			"%#Title#", tostring(n), "%* ",
 		})
-		right = table.concat({
-			"[⯈]",
-			"%=%#Comment#  csvcols%*",
-		})
+		right = "%=%#Comment#  csvcols%*"
 	end
-	local right = "%=%#Comment#  csvcols%*"
-	return left .. right
+	return table.concat({ left, right })
 end
 
 function M._click_inc(_, _, _, _)
@@ -735,6 +732,10 @@ function M._click_dec(_, _, _, _)
 	if not is_csv_buf(buf) then return end
 	inc_header_n(buf, -1)
 	M.refresh(win)
+end
+
+function M._click_toggle_clean(_, _, _, _)
+	M.toggle_clean_view()
 end
 
 -- ==========================
@@ -776,28 +777,77 @@ local function render_clean_view(win, buf, sep, top, bottom)
 		st.clean_widths      = compute_column_widths_for(buf, sep, top, bottom, false)
 		st.clean_widths_tick = changedtick
 	end
-	local widths = st.clean_widths or {}
+	local body_widths   = st.clean_widths or {}
+
+	local header_widths = {}
+	local header_n      = get_header_n(buf) -- number of header lines from top
+
+	if header_n and header_n > 0 then
+		-- iterate header lines 0 .. header_n-1
+		for lnum = 0, header_n - 1 do
+			local line = vim.api.nvim_buf_get_lines(buf, lnum, lnum + 1, false)[1]
+			if not line then
+				break
+			end
+
+			-- only consider header lines that actually contain the separator
+			if line:find(sep, 1, true) then
+				-- compute widths for THIS single header line
+				local w = compute_column_widths_for(buf, sep, lnum, lnum + 1, false)
+				for i, width in ipairs(w) do
+					if width > (header_widths[i] or 0) then
+						header_widths[i] = width
+					end
+				end
+			end
+		end
+	end
+
+	-- merge body and header widths
+	local widths   = {}
+	local max_cols = math.max(#body_widths, #header_widths)
+	for i = 1, max_cols do
+		local wb = body_widths[i] or 0
+		local wh = header_widths[i] or 0
+		widths[i] = (wb > wh) and wb or wh
+	end
 
 	-- visible source lines
 	local src_lines = vim.api.nvim_buf_get_lines(buf, top, bottom, false)
 
-	-- build padded lines + per-column starts in padded space
+	-- build padded lines + per-column starts in padded space, now using merged widths
 	local padded, starts_per_line = build_padded_lines(src_lines, sep, widths)
+
+	-- ensure/resize clean overlay to text area
+	local ov = ensure_clean_overlay(win, text_h, col_off, text_w)
+
+	-- sync horizontal scrolling between source window and clean overlay
+	for _, w in ipairs({ win, ov.win }) do
+		vim.api.nvim_set_option_value("wrap", false, { win = w })
+		vim.api.nvim_set_option_value("scrollbind", true, { win = w })
+	end
+	pcall(vim.api.nvim_set_option_value, "scrollopt", "hor", {})
+
+	-- slice padded lines to visible region [left, left+text_w)
+	local sliced, slice_offsets = {}, {}
+	for i, pl in ipairs(padded) do
+		local s_txt, s_off = slice_display(pl, left, text_w)
+		sliced[i]          = s_txt
+		slice_offsets[i]   = s_off
+	end
 
 	-- ensure/resize clean overlay to text area
 	local ov = ensure_clean_overlay(win, text_h, col_off, text_w)
 
 	-- sync (horizontal) scrolling between source window and clean overlay
 	for _, w in ipairs({ win, ov.win }) do
-		-- required for horizontal scroll (zL/zH/zl/zh)
 		vim.api.nvim_set_option_value("wrap", false, { win = w })
 		vim.api.nvim_set_option_value("scrollbind", true, { win = w })
 	end
-	-- "hor,ver" for bidirectional sync; "hor" horizontal only
 	pcall(vim.api.nvim_set_option_value, "scrollopt", "hor", {})
+	--pcall(vim.api.nvim_set_option_value, "scrollopt", "ver", {})
 
 	-- slice padded lines to visible region [left, left+text_w)
-	local sliced, slice_offsets = {}, {}
 	for i, pl in ipairs(padded) do
 		local s_txt, s_off = slice_display(pl, left, text_w)
 		sliced[i]          = s_txt
@@ -939,10 +989,6 @@ function M.toggle_clean_view()
 		close_clean_overlay(win)
 	end
 	M.refresh(win)
-end
-
-function M._click_toggle_clean(_, _, _, _)
-	M.toggle_clean_view()
 end
 
 -- setup
