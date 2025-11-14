@@ -582,6 +582,7 @@ local function build_padded_lines(lines, sep, widths)
 end
 
 -- Render sticky header, aligned via textoff, with horizontal scrolling support.
+-- Render sticky header, aligned via textoff, with horizontal scrolling support.
 local function render_header(win, buf, sep, top)
 	local n = get_header_n(buf)
 	if n <= 0 or top <= 0 then
@@ -593,25 +594,41 @@ local function render_header(win, buf, sep, top)
 		close_overlay(win)
 		return
 	end
+
 	-- Source header lines
 	local upto            = math.min(n, total)
 	local header_lines    = vim.api.nvim_buf_get_lines(buf, 0, upto, false)
+
 	-- Window geometry and horizontal scroll
 	local col_off, text_w = win_text_area(win)
 	local left            = win_leftcol(win)
+
 	-- Ensure/resize overlay
 	local ov              = ensure_overlay(win, upto, col_off, text_w)
 	vim.api.nvim_set_option_value("modifiable", true, { buf = ov.buf })
 	vim.api.nvim_buf_clear_namespace(ov.buf, ns, 0, -1)
+
 	local st = bufstate(buf)
+
 	if st.clean_active then
-		-- Clean view: compute widths (whole file) if changed
-		if not st.clean_widths or st.clean_widths_tick ~= vim.api.nvim_buf_get_changedtick(buf) then
-			st.clean_widths      = compute_column_widths_for(buf, sep, top, vim.fn.line("w$"), true)
-			st.clean_widths_tick = vim.api.nvim_buf_get_changedtick(buf)
+		----------------------------------------------------------------
+		-- CLEAN VIEW: use same column widths as body (if available)
+		----------------------------------------------------------------
+		local widths = st.clean_widths_merged or st.clean_widths or {}
+
+		-- Fallback: compute widths if nothing is cached yet
+		if (not widths or #widths == 0) then
+			local changedtick = vim.api.nvim_buf_get_changedtick(buf)
+			if not st.clean_widths or st.clean_widths_tick ~= changedtick then
+				st.clean_widths      = compute_column_widths_for(buf, sep, 0, total, true)
+				st.clean_widths_tick = changedtick
+			end
+			widths = st.clean_widths or {}
 		end
+
 		-- Build padded header lines and per-column starts
-		local padded, starts_per_line = build_padded_lines(header_lines, sep, st.clean_widths or {})
+		local padded, starts_per_line = build_padded_lines(header_lines, sep, widths)
+
 		-- Slice each padded header line to visible region
 		local sliced                  = {}
 		local slice_offsets           = {}
@@ -621,6 +638,7 @@ local function render_header(win, buf, sep, top)
 			slice_offsets[i]   = s_off
 		end
 		vim.api.nvim_buf_set_lines(ov.buf, 0, -1, false, sliced)
+
 		-- Colorize by column using padded starts and slice offsets
 		for i, _ in ipairs(header_lines) do
 			local starts   = starts_per_line[i] or {}
@@ -643,7 +661,9 @@ local function render_header(win, buf, sep, top)
 			end
 		end
 	else
-		-- Normal view: slice raw header lines and highlight ranges within slice
+		----------------------------------------------------------------
+		-- NORMAL VIEW: your original code, unchanged
+		----------------------------------------------------------------
 		local sliced        = {}
 		local slice_offsets = {}
 		for i, raw in ipairs(header_lines) do
@@ -652,6 +672,7 @@ local function render_header(win, buf, sep, top)
 			slice_offsets[i]   = s_off
 		end
 		vim.api.nvim_buf_set_lines(ov.buf, 0, -1, false, sliced)
+
 		for i, raw in ipairs(header_lines) do
 			local ranges = field_ranges(raw, sep, M.config.max_columns)
 			local s_off  = slice_offsets[i] or 0
@@ -661,6 +682,7 @@ local function render_header(win, buf, sep, top)
 				local s, e  = r[1], r[2]
 				local vs    = s - s_off
 				local ve    = (e == -1) and -1 or (e - s_off)
+
 				if ve == -1 then
 					if vs < #vis then
 						add_hl_line(ov.buf, ns, group, i - 1, math.max(0, vs), -1)
@@ -670,6 +692,7 @@ local function render_header(win, buf, sep, top)
 						add_hl_line(ov.buf, ns, group, i - 1, math.max(0, vs), math.max(0, ve))
 					end
 				end
+
 				-- highlight separators if visible
 				if col_idx < #ranges and e ~= -1 then
 					local sep_col = e - s_off
@@ -685,6 +708,7 @@ local function render_header(win, buf, sep, top)
 			end
 		end
 	end
+
 	vim.api.nvim_set_option_value("modifiable", false, { buf = ov.buf })
 end
 
@@ -737,10 +761,6 @@ end
 function M._click_toggle_clean(_, _, _, _)
 	M.toggle_clean_view()
 end
-
--- ==========================
--- Clean-view implementation
--- ==========================
 
 -- Determine which CSV column the cursor is on (0-based index) for a given line.
 local function cursor_col_index(line, sep, max_cols, cur_byte_col0)
@@ -812,6 +832,9 @@ local function render_clean_view(win, buf, sep, top, bottom)
 		widths[i] = (wb > wh) and wb or wh
 	end
 
+	-- store for header renderer to reuse
+	st.clean_widths_merged = widths
+
 	-- visible source lines
 	local src_lines = vim.api.nvim_buf_get_lines(buf, top, bottom, false)
 
@@ -821,33 +844,13 @@ local function render_clean_view(win, buf, sep, top, bottom)
 	-- ensure/resize clean overlay to text area
 	local ov = ensure_clean_overlay(win, text_h, col_off, text_w)
 
-	-- sync horizontal scrolling between source window and clean overlay
+	-- ensure nowrap in both windows; we slice by win_leftcol(win)
 	for _, w in ipairs({ win, ov.win }) do
 		vim.api.nvim_set_option_value("wrap", false, { win = w })
-		vim.api.nvim_set_option_value("scrollbind", true, { win = w })
 	end
-	pcall(vim.api.nvim_set_option_value, "scrollopt", "hor", {})
 
 	-- slice padded lines to visible region [left, left+text_w)
 	local sliced, slice_offsets = {}, {}
-	for i, pl in ipairs(padded) do
-		local s_txt, s_off = slice_display(pl, left, text_w)
-		sliced[i]          = s_txt
-		slice_offsets[i]   = s_off
-	end
-
-	-- ensure/resize clean overlay to text area
-	local ov = ensure_clean_overlay(win, text_h, col_off, text_w)
-
-	-- sync (horizontal) scrolling between source window and clean overlay
-	for _, w in ipairs({ win, ov.win }) do
-		vim.api.nvim_set_option_value("wrap", false, { win = w })
-		vim.api.nvim_set_option_value("scrollbind", true, { win = w })
-	end
-	pcall(vim.api.nvim_set_option_value, "scrollopt", "hor", {})
-	--pcall(vim.api.nvim_set_option_value, "scrollopt", "ver", {})
-
-	-- slice padded lines to visible region [left, left+text_w)
 	for i, pl in ipairs(padded) do
 		local s_txt, s_off = slice_display(pl, left, text_w)
 		sliced[i]          = s_txt
