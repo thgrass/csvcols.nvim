@@ -20,6 +20,11 @@ M.config           = {
 		"#00838f", "#827717", "#441fa2", "#37474f", "#558b2f",
 		"#c62828", "#283593", "#00897b", "#5d4037", "#1976d2",
 	},
+	-- colors = {
+	-- "#778500", "#288500", "#007e34", "#00755e", "#b67e00",
+	-- "#ef6c00", "#ea4558", "#be4685", "#7c5292", "#41537e",
+	-- "#2f4858", "#855538", "#005246", "#bca79c", "#54433a"
+	-- }
 	mode                    = "bg", -- "bg" or "fg"
 	max_columns             = 128,
 	patterns                = { "*.csv", "*.tsv" },
@@ -237,7 +242,7 @@ local function win_text_area(win)
 end
 
 -- Return the leftmost display column of window 'win' (horizontal scroll).
-local function win_leftcol(win)
+local function win_leftcol()
 	local v = vim.fn.winsaveview()
 	return (v and v.leftcol) or 0
 end
@@ -504,7 +509,6 @@ local function set_default_hl()
 end
 
 
-
 -- determine the separator used in buf
 local function get_sep(buf)
 	local st = bufstate(buf)
@@ -634,7 +638,6 @@ local function build_padded_lines(lines, sep, widths)
 end
 
 -- Render sticky header, aligned via textoff, with horizontal scrolling support.
--- Render sticky header, aligned via textoff, with horizontal scrolling support.
 local function render_header(win, buf, sep, top)
 	local n = get_header_n(buf)
 	if n <= 0 or top <= 0 then
@@ -663,9 +666,7 @@ local function render_header(win, buf, sep, top)
 	local st = bufstate(buf)
 
 	if st.clean_active then
-		----------------------------------------------------------------
-		-- CLEAN VIEW: use same column widths as body (if available)
-		----------------------------------------------------------------
+		-- use same column widths as body (if available)
 		local widths = st.clean_widths_merged or st.clean_widths or {}
 
 		-- Fallback: compute widths if nothing is cached yet
@@ -678,44 +679,63 @@ local function render_header(win, buf, sep, top)
 			widths = st.clean_widths or {}
 		end
 
+		-- Determin which header lines are comments and to be excluded from column width assignments
+		local is_comment = {}
+		for i, line in ipairs(header_lines) do
+			is_comment[i] = line:match("^%s*#") or line:match("^%s*//") or line:match("^%s*%-%-")
+		end
+
 		-- Build padded header lines and per-column starts
 		local padded, starts_per_line = build_padded_lines(header_lines, sep, widths)
 
 		-- Slice each padded header line to visible region
 		local sliced                  = {}
 		local slice_offsets           = {}
-		for i, pl in ipairs(padded) do
-			local s_txt, s_off = slice_display(pl, left, text_w)
-			sliced[i]          = s_txt
-			slice_offsets[i]   = s_off
+		local comment_range           = {}
+
+		for i, raw in ipairs(header_lines) do
+			if is_comment[i] then
+				-- normal view mode for comment lines
+				local s_txt, s_off = slice_display(raw, left, text_w)
+				sliced[i]          = s_txt
+				slice_offsets[i]   = s_off
+				comment_range[i]   = field_ranges(raw, sep, M.config.max_columns)
+			else
+				local pl           = padded[i]
+				local s_txt, s_off = slice_display(pl, left, text_w)
+				sliced[i]          = s_txt
+				slice_offsets[i]   = s_off
+			end
 		end
+
 		vim.api.nvim_buf_set_lines(ov.buf, 0, -1, false, sliced)
 
 		-- Colorize by column using padded starts and slice offsets
 		for i, _ in ipairs(header_lines) do
-			local starts   = starts_per_line[i] or {}
-			local s_off    = slice_offsets[i] or 0
-			local line_txt = sliced[i] or ""
-			for col_idx = 1, #starts do
-				local group      = ("CsvCol%d"):format(((col_idx - 1) % #M.config.colors) + 1)
-				local sx         = (starts[col_idx] or 0) - s_off
-				local next_start = starts[col_idx + 1]
-				local nx         = (next_start and (next_start - s_off)) or -1
-				if nx == -1 then
-					if sx < #line_txt then
-						add_hl_line(ov.buf, ns, group, i - 1, math.max(0, sx), -1)
-					end
-				else
-					if nx > 0 and sx < #line_txt then
-						add_hl_line(ov.buf, ns, group, i - 1, math.max(0, sx), math.max(0, nx))
+			if not is_comment[i] then
+				local starts   = starts_per_line[i] or {}
+				local s_off    = slice_offsets[i] or 0
+				local line_txt = sliced[i] or ""
+				for col_idx = 1, #starts do
+					local group      = ("CsvCol%d"):format(((col_idx - 1) % #M.config.colors) + 1)
+					local sx         = (starts[col_idx] or 0) - s_off
+					local next_start = starts[col_idx + 1]
+					local nx         = (next_start and (next_start - s_off)) or -1
+					if nx == -1 then
+						if sx < #line_txt then
+							add_hl_line(ov.buf, ns, group, i - 1, math.max(0, sx), -1)
+						end
+					else
+						if nx > 0 and sx < #line_txt then
+							add_hl_line(ov.buf, ns, group, i - 1, math.max(0, sx),
+								math.max(0, nx))
+						end
 					end
 				end
 			end
 		end
 	else
-		----------------------------------------------------------------
-		-- NORMAL VIEW: your original code, unchanged
-		----------------------------------------------------------------
+		-- normal view mode
 		local sliced        = {}
 		local slice_offsets = {}
 		for i, raw in ipairs(header_lines) do
